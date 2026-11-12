@@ -7,6 +7,7 @@
 //! the real renderer.
 
 mod layout;
+mod menu;
 mod render;
 
 use crate::annotate::{text_size, Annotation, Shape, Source, Tool};
@@ -246,6 +247,10 @@ pub struct Overlay {
     flash: Option<(String, Instant)>,
     dirty: bool,
     started_selection: bool,
+    /// The right-click menu, while open.
+    menu: Option<menu::Menu>,
+    /// The press that closed the menu must not also start a selection.
+    swallow_release: bool,
 }
 
 const FLASH_TIME: Duration = Duration::from_millis(1500);
@@ -290,6 +295,8 @@ impl Overlay {
             flash: None,
             dirty: true,
             started_selection: false,
+            menu: None,
+            swallow_release: false,
         }
     }
 
@@ -640,6 +647,14 @@ impl Overlay {
         self.cursor_inside = true;
         self.dirty = true;
 
+        if self.menu.is_some() {
+            let hover = self.menu_hit(p);
+            if let Some(m) = &mut self.menu {
+                m.hover = hover;
+            }
+            return;
+        }
+
         let b = self.bounds();
         let clamped = Pt::new(p.x.clamp(b.x, b.right()), p.y.clamp(b.y, b.bottom()));
         match self.drag {
@@ -692,10 +707,34 @@ impl Overlay {
 
     pub fn pointer_button(&mut self, button: Button, pressed: bool) {
         self.dirty = true;
+        if self.menu.is_some() {
+            match (button, pressed) {
+                (Button::Left, true) => {
+                    if !self.menu_contains(self.cursor) {
+                        self.menu = None;
+                        self.swallow_release = true;
+                    }
+                }
+                (Button::Left, false) => {
+                    if let Some(i) = self.menu_hit(self.cursor) {
+                        self.run_menu(i);
+                    }
+                }
+                (Button::Right, true) => self.open_menu(),
+                (Button::Right, false) => {}
+            }
+            return;
+        }
         match (button, pressed) {
             (Button::Left, true) => self.press(),
-            (Button::Left, false) => self.release(),
-            (Button::Right, true) => self.step_back(),
+            (Button::Left, false) => {
+                if !std::mem::take(&mut self.swallow_release) {
+                    self.release()
+                }
+            }
+            // Right click cancels a drag in progress, otherwise opens the menu.
+            (Button::Right, true) if !matches!(self.drag, Drag::None) => self.step_back(),
+            (Button::Right, true) => self.open_menu(),
             (Button::Right, false) => {}
         }
     }
@@ -994,7 +1033,7 @@ impl Overlay {
 
     // ---- input: keyboard ---------------------------------------------------
 
-    /// Esc / right click: undo one level of state, closing at the outermost.
+    /// Esc: undo one level of state, closing at the outermost.
     fn step_back(&mut self) {
         if !matches!(self.drag, Drag::None) {
             self.drag = Drag::None;
@@ -1032,6 +1071,30 @@ impl Overlay {
 
     pub fn key(&mut self, key: Key) {
         self.dirty = true;
+        if let Some(menu) = &mut self.menu {
+            let n = menu.items.len();
+            let step = |from: Option<usize>, fwd: bool| {
+                let mut i = from.unwrap_or(if fwd { n - 1 } else { 0 });
+                for _ in 0..n {
+                    i = if fwd { (i + 1) % n } else { (i + n - 1) % n };
+                    if menu.items[i].is_some() {
+                        return Some(i);
+                    }
+                }
+                None
+            };
+            match key {
+                Key::Down => menu.hover = step(menu.hover, true),
+                Key::Up => menu.hover = step(menu.hover, false),
+                Key::Enter => {
+                    if let Some(i) = menu.hover {
+                        self.run_menu(i);
+                    }
+                }
+                _ => self.menu = None,
+            }
+            return;
+        }
         if self.text_edit.is_some() {
             match key {
                 Key::Escape => self.commit_text(),
@@ -1201,6 +1264,13 @@ impl Overlay {
     }
 
     pub fn cursor_kind(&self) -> CursorKind {
+        if let Some(m) = &self.menu {
+            return if m.hover.is_some() {
+                CursorKind::Pointer
+            } else {
+                CursorKind::Default
+            };
+        }
         if let Drag::Move { .. } = self.drag {
             return CursorKind::Move;
         }

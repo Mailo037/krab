@@ -93,10 +93,13 @@ Run-Case "freeform-lasso" "copy" {
 } @("freeform")
 Run-Case "full-screen" "copy" { } @("full")
 Run-Case "escape-cancels" "edit" { [Inp]::Key(0x1B) }
-Run-Case "right-click-cancels" "edit" {
+Run-Case "right-click-menu-then-escape" "edit" {
     [Inp]::SetCursorPos(500, 500) | Out-Null; Start-Sleep -Milliseconds 80
     [Inp]::mouse_event(8, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 30
-    [Inp]::mouse_event(0x10, 0, 0, 0, [UIntPtr]::Zero)
+    [Inp]::mouse_event(0x10, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 150
+    # The first Esc closes the menu, the second the overlay.
+    [Inp]::Key(0x1B); Start-Sleep -Milliseconds 100
+    [Inp]::Key(0x1B)
 }
 
 [void][Inp]::SetCursorPos($saved.X, $saved.Y)

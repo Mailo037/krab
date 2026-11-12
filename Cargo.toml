@@ -1,6 +1,6 @@
 [package]
 name = "krab"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Krab - a lightweight snipping tool that opens in milliseconds"
 license = "MIT"
@@ -58,6 +58,8 @@ windows = { version = "0.61", features = [
     "Graphics_Imaging",
     "Media_Ocr",
     "Storage_Streams",
+    "Win32_System_Com",
+    "Win32_UI_Shell",
 ] }
 
 [target.'cfg(not(windows))'.dependencies]

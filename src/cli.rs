@@ -18,6 +18,10 @@ pub enum Command {
     Autostart(bool),
     /// Check for a new version and install it.
     Update,
+    /// Install as a desktop application.
+    Install,
+    /// Remove the installed application.
+    Uninstall,
     Help,
     Version,
     /// Internal: keep clipboard contents alive on Linux.
@@ -46,6 +50,8 @@ pub struct Args {
     pub background: bool,
     /// This daemon replaces one that just installed an update.
     pub updated: bool,
+    /// This daemon was just installed as an application.
+    pub installed: bool,
 }
 
 pub const HELP: &str = "\
@@ -77,6 +83,8 @@ BACKGROUND INSTANCE:
         --settings             open the settings window
         --config               open the configuration file
         --update               install the newest version now
+        --install              install Krab as an app (Start menu, Applications, app menu)
+        --uninstall            remove the installed app
 
     -h, --help                 show this help
     -V, --version              show the version
@@ -95,6 +103,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
         exit_after_ms: None,
         background: false,
         updated: false,
+        installed: false,
     };
     let mut it = args.into_iter();
     let value = |it: &mut dyn Iterator<Item = String>, flag: &str| -> Result<String, String> {
@@ -111,6 +120,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             "--update" | "update" => command = Some(Command::Update),
             "--background" => out.background = true,
             "--updated" => out.updated = true,
+            "--installed" => out.installed = true,
+            "--install" | "install" => command = Some(Command::Install),
+            "--uninstall" | "uninstall" => command = Some(Command::Uninstall),
             "--autostart" => {
                 let v = value(&mut it, "--autostart")?;
                 command = Some(Command::Autostart(match v.to_ascii_lowercase().as_str() {

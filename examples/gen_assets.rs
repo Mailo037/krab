@@ -476,6 +476,16 @@ fn scene_precision(px: &[u32], windows: &[WinInfo]) -> Vec<u32> {
     render(&mut o)
 }
 
+/// The right-click menu over a window.
+fn scene_menu(px: &[u32], windows: &[WinInfo]) -> Vec<u32> {
+    let mut o = overlay(px, windows, Mode::Rect, Kind::Snip);
+    mv(&mut o, 860.0, 330.0);
+    o.pointer_button(Button::Right, true);
+    o.pointer_button(Button::Right, false);
+    mv(&mut o, 900.0, 345.0);
+    render(&mut o)
+}
+
 /// Recording: the area is chosen, one click starts the capture.
 fn scene_record(px: &[u32], windows: &[WinInfo]) -> Vec<u32> {
     let mut o = overlay(px, windows, Mode::Rect, Kind::Record);
@@ -744,6 +754,12 @@ fn main() {
     );
     let (huds, hw, hh) = scene_huds(&snip);
     save("assets/screenshot-status.png", &huds, hw, hh);
+    save(
+        "assets/screenshot-menu.png",
+        &scene_menu(&px, &windows),
+        W,
+        H,
+    );
     let (st, sw, sh) = scene_settings();
     save("assets/screenshot-settings.png", &st, sw, sh);
     let (b, bw, bh) = banner(&annotate);

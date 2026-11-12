@@ -171,7 +171,8 @@ pub fn enabled_here() -> bool {
     }
 }
 
-fn is_dev_build(exe: &Path) -> bool {
+/// A build running from a cargo `target` folder.
+pub fn is_dev_build(exe: &Path) -> bool {
     let parts: Vec<String> = exe
         .components()
         .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())

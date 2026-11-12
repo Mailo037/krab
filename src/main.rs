@@ -5,6 +5,7 @@
 use krab::app::{self, Launch, UserEvent};
 use krab::cli::{self, Args, Command};
 use krab::config::Config;
+use krab::install;
 use krab::ipc::{self, Message, Request};
 use krab::output::{self, Image};
 use krab::update::{self, Outcome};
@@ -30,6 +31,8 @@ fn main() -> ExitCode {
         trace::enable();
     }
     trace::mark("started");
+    // Started by double-click / from a file manager, without arguments.
+    let plain_launch = std::env::args_os().len() == 1;
 
     let result = match args.command.clone() {
         Command::Help => {
@@ -69,6 +72,11 @@ fn main() -> ExitCode {
                 })
         }
         Command::Update => run_update(&args),
+        Command::Install => {
+            platform::attach_console();
+            install_and_start().map(|exe| println!("Installed to {}", exe.display()))
+        }
+        Command::Uninstall => uninstall_app(),
         Command::Daemon => {
             if args.updated {
                 // The instance that installed the update is shutting down;
@@ -92,6 +100,7 @@ fn main() -> ExitCode {
                         output: None,
                         quiet: args.quiet,
                         updated: args.updated,
+                        installed: args.installed,
                         open_settings: false,
                         exit_after: args.exit_after_ms.map(Duration::from_millis),
                     },
@@ -111,13 +120,26 @@ fn main() -> ExitCode {
                         output: None,
                         quiet: true,
                         updated: false,
+                        installed: false,
                         open_settings: true,
                         exit_after: None,
                     },
                 )
             }
         }
-        Command::Snip(req) => snip(&args, req),
+        Command::Snip(req) => {
+            // The downloaded program installs itself on its first plain launch.
+            if plain_launch && install::should_install() {
+                match install_and_start() {
+                    Ok(_) => {
+                        trace::flush();
+                        return ExitCode::SUCCESS;
+                    }
+                    Err(e) => eprintln!("krab: could not install: {e}"),
+                }
+            }
+            snip(&args, req)
+        }
     };
 
     trace::flush();
@@ -181,6 +203,7 @@ fn snip(args: &Args, req: Request) -> Result<(), String> {
             output: args.output.clone(),
             quiet: true,
             updated: false,
+            installed: false,
             open_settings: false,
             exit_after: args.exit_after_ms.map(Duration::from_millis),
         },
@@ -192,6 +215,62 @@ fn snip(args: &Args, req: Request) -> Result<(), String> {
         update::spawn_background_check();
     }
     Ok(())
+}
+
+/// Stop a running background instance and wait until it is gone.
+fn stop_daemon() {
+    if ipc::send(&Message::Quit).is_ok() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while ipc::send(&Message::Ping).is_ok() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Install this program as an app and start the installed copy.
+fn install_and_start() -> Result<std::path::PathBuf, String> {
+    stop_daemon();
+    let exe = install::install()?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.args(["--daemon", "--installed"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    platform::hide_console(&mut cmd);
+    cmd.spawn().map_err(|e| e.to_string())?;
+    Ok(exe)
+}
+
+/// `krab --uninstall`, also what Settings > Apps runs on Windows.
+fn uninstall_app() -> Result<(), String> {
+    use rfd::{MessageButtons, MessageDialog, MessageDialogResult, MessageLevel};
+    let answer = MessageDialog::new()
+        .set_title("Uninstall Krab")
+        .set_description(
+            "Remove Krab from this computer?\n\nYour settings and screenshots are kept.",
+        )
+        .set_level(MessageLevel::Info)
+        .set_buttons(MessageButtons::YesNo)
+        .show();
+    if answer != MessageDialogResult::Yes {
+        return Ok(());
+    }
+    stop_daemon();
+    let result = install::uninstall();
+    let (level, text) = match &result {
+        Ok(()) => (MessageLevel::Info, "Krab was removed.".to_string()),
+        Err(e) => (
+            MessageLevel::Error,
+            format!("Krab could not be removed completely:\n{e}"),
+        ),
+    };
+    MessageDialog::new()
+        .set_title("Uninstall Krab")
+        .set_description(text)
+        .set_level(level)
+        .set_buttons(MessageButtons::Ok)
+        .show();
+    result
 }
 
 /// Run the event loop; if it stopped to make way for an update, start the

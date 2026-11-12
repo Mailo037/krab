@@ -10,6 +10,7 @@ pub mod geom;
 pub mod gfx;
 pub mod hotkey;
 pub mod hud;
+pub mod install;
 pub mod ipc;
 pub mod ocr;
 pub mod output;

@@ -19,6 +19,9 @@ beyond the Rust toolchain.
 Install straight from the repository with `cargo install --git https://github.com/Mailo037/krab`. Builds
 that run from a cargo `target` directory never update themselves.
 
+Started from a source build (anything inside a cargo `target` folder), Krab neither installs nor updates itself.
+Set `KRAB_NO_INSTALL=1` to stop a release build from installing itself on its first plain start.
+
 ## Testing
 
 ```sh
@@ -52,7 +55,8 @@ real desktops. Multi-monitor setups are supported by design but have mostly been
 src/
   main.rs        entry point: CLI, hand-off to a running instance, cold-start capture thread
   app.rs         winit event loop, overlay / status / settings windows, tray icon
-  overlay/       the capture UI as a pure state machine (input events in, pixels out)
+  overlay/       the capture UI as a pure state machine (input events in, pixels out),
+                 including the right-click menu (overlay/menu.rs)
   annotate.rs    markup objects: drawing and hit testing
   gfx/           canvas, text and icon rendering on a u32 pixel buffer
   brand.rs       the Krab mark (app and tray icon)
@@ -65,6 +69,7 @@ src/
   ocr.rs         text extraction and QR codes
   ipc.rs         single-instance hand-off over a local socket / named pipe
   update.rs      automatic updates from GitHub releases
+  install.rs     per-user install: Start menu + Apps entry, Krab.app, .desktop file
 ```
 
 The overlay knows nothing about windows or the operating system. That is what makes it testable - the test

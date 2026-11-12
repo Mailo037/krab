@@ -41,6 +41,10 @@ A pixel loupe for exact edges and colours:
 
 ![Pixel loupe](assets/screenshot-precision.png)
 
+Right-click for everything else - snip the window under the pointer, copy a colour's hex code, save, undo:
+
+![Right-click menu](assets/screenshot-menu.png)
+
 Screen recording and status feedback:
 
 ![Recording](assets/screenshot-record.png)
@@ -84,7 +88,20 @@ Not included: audio in recordings, the share sheet, printing, and HDR colour cor
 ## Install
 
 Download the archive for your system from the
-[releases page](https://github.com/Mailo037/krab/releases), unpack it and run `krab`.
+[releases page](https://github.com/Mailo037/krab/releases), unpack it and open `krab`. On its first start Krab
+installs itself as a regular app for your user - no administrator rights needed - and starts from there:
+
+| System | Installed to | Find it in |
+|---|---|---|
+| Windows | `%LOCALAPPDATA%\Programs\Krab` | Start menu, search, *Settings > Apps* |
+| macOS | `~/Applications/Krab.app` | Launchpad, Spotlight, Finder |
+| Linux | `~/.local/bin/krab` | your desktop's app menu |
+
+It also turns on *Start when I log in* (switch it off in the settings) and opens the settings once.
+The downloaded file can be deleted afterwards.
+
+To remove Krab, uninstall it in *Settings > Apps* on Windows, or run `krab --uninstall`. Your settings and
+screenshots are kept.
 
 | System | File |
 |---|---|
@@ -105,7 +122,8 @@ Windows 11 puts new tray icons into the overflow menu (the `^` arrow); drag Krab
 sight. If Windows opens its own Snipping Tool on `PrintScreen`, the settings window offers to turn that off.
 
 **macOS** - the first capture asks for the *Screen Recording* permission (System Settings > Privacy & Security).
-The binary is not signed; remove the quarantine flag after downloading: `xattr -d com.apple.quarantine krab`.
+The program is not signed; remove the quarantine flag after downloading (`xattr -d com.apple.quarantine krab`)
+before opening it the first time.
 Default shortcut: `Cmd+Shift+2`. After an update macOS may ask for the permission once more.
 
 **Linux** - the tray icon appears on KDE, Xfce, Cinnamon, Budgie and Ubuntu's desktop; on plain GNOME it needs
@@ -158,6 +176,8 @@ BACKGROUND INSTANCE:
         --autostart <on|off>   start Krab when you log in
         --config               open the configuration file
         --update               install the newest version now
+        --install              install Krab as an app (done automatically on first start)
+        --uninstall            remove the installed app
 ```
 
 Examples:
@@ -175,7 +195,8 @@ krab --record             # choose an area and record it
 | While selecting | |
 |---|---|
 | `R` `F` `W` `M` | rectangle, freeform, window, full screen (monitor) |
-| `Esc` or right click | cancel |
+| `Esc` | cancel |
+| right click | menu: snip this window, the whole screen, copy the colour under the pointer |
 
 | After selecting | |
 |---|---|
@@ -187,7 +208,8 @@ krab --record             # choose an area and record it
 | arrow keys (`Shift` = 10 px, `Ctrl` = resize) | nudge the selection |
 | `Shift` while drawing | straight strokes, 45 degree lines, squares and circles |
 | mouse wheel | stroke size |
-| `Esc` or right click | step back (text, then selection, then close) |
+| `Esc` | step back (text, then selection, then close) |
+| right click | menu: copy, save, copy text, copy colour, select the window under the pointer, undo |
 
 On macOS use `Cmd` instead of `Ctrl`.
 

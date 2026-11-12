@@ -137,11 +137,74 @@ fn escape_steps_back_then_cancels() {
 }
 
 #[test]
-fn right_click_cancels_when_nothing_is_selected() {
+fn right_click_opens_a_menu_that_closes_and_copies_colours() {
     let mut o = overlay(Mode::Rect);
     o.pointer_moved(100.0, 100.0);
     o.pointer_button(Button::Right, true);
+    assert!(o.menu.is_some());
+    assert!(o.take_outcome().is_none());
+
+    // "Copy colour" puts the hex code of the pixel under the click on the clipboard.
+    let idx = o
+        .menu
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .position(|i| *i == Some(menu::Item::CopyColor))
+        .unwrap();
+    let (_, rows) = o.menu_layout().unwrap();
+    let c = rows[idx].unwrap().center();
+    click(&mut o, (c.x, c.y));
+    let want = Color::from_u32(src_px(100, 100)).to_hex_string();
+    assert!(matches!(o.take_outcome(), Some(Outcome::CopyText(h)) if h == want));
+    assert!(o.menu.is_none());
+
+    // Esc closes the menu, a second Esc closes the overlay.
+    o.pointer_button(Button::Right, true);
+    o.key(Key::Escape);
+    assert!(o.menu.is_none() && o.take_outcome().is_none());
+    o.key(Key::Escape);
     assert!(matches!(o.take_outcome(), Some(Outcome::Cancel)));
+}
+
+#[test]
+fn menu_selects_the_window_under_the_pointer() {
+    let windows = [WinInfo {
+        rect: RectI::new(200, 150, 300, 200),
+        title: "editor".into(),
+    }];
+    let mut o = Overlay::new(
+        shot(),
+        &windows,
+        Options::default(),
+        Shared {
+            mode: Mode::Rect,
+            kind: Kind::Snip,
+            delay: 3,
+        },
+    );
+    o.pointer_moved(300.0, 250.0);
+    o.pointer_button(Button::Right, true);
+    let items = o.menu.as_ref().unwrap().items.clone();
+    let idx = items
+        .iter()
+        .position(|i| *i == Some(menu::Item::SnipWindow))
+        .expect("window entry");
+    let (_, rows) = o.menu_layout().unwrap();
+    let c = rows[idx].unwrap().center();
+    click(&mut o, (c.x, c.y));
+    assert_eq!(o.selection(), Some(RectI::new(200, 150, 300, 200)));
+}
+
+#[test]
+fn clicking_outside_the_menu_only_closes_it() {
+    let mut o = overlay(Mode::Rect);
+    o.pointer_moved(100.0, 100.0);
+    o.pointer_button(Button::Right, true);
+    drag(&mut o, (600.0, 500.0), (700.0, 600.0));
+    assert!(o.menu.is_none());
+    assert!(o.selection().is_none(), "the closing click must not select");
 }
 
 #[test]

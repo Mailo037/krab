@@ -60,6 +60,8 @@ pub struct Launch {
     pub updated: bool,
     /// Open the settings window right away.
     pub open_settings: bool,
+    /// Krab was just installed as an app: welcome the user.
+    pub installed: bool,
     pub exit_after: Option<Duration>,
 }
 
@@ -1144,6 +1146,7 @@ impl App {
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             update::cleanup();
+            crate::install::refresh();
             if !enabled {
                 return;
             }
@@ -1207,7 +1210,19 @@ impl App {
             Err(e) => eprintln!("krab: tray unavailable: {e}"),
         }
 
-        if self.launch.updated {
+        if self.launch.installed {
+            // A tray app is expected to be there after logging in.
+            let _ = crate::platform::autostart::set(true);
+            let place = if cfg!(windows) {
+                "Find it in the Start menu and the tray"
+            } else if cfg!(target_os = "macos") {
+                "Find it in Applications and the menu bar"
+            } else {
+                "Find it in your app menu and the tray"
+            };
+            self.toast(el, "Krab is installed".into(), place.into(), None, None);
+            self.launch.open_settings = true;
+        } else if self.launch.updated {
             self.toast(
                 el,
                 format!("Krab was updated to {}", env!("CARGO_PKG_VERSION")),

@@ -259,7 +259,7 @@ impl Overlay {
         for bar in bars.iter() {
             self.draw_bar(&mut c, bar);
         }
-        if idle {
+        if idle && self.menu.is_none() {
             if let Some(btn) = self.hover_btn {
                 self.draw_tooltip(&mut c, &bars, btn);
             }
@@ -277,6 +277,7 @@ impl Overlay {
         let resizing = matches!(self.drag, Drag::Resize { .. });
         if self.cursor_inside
             && !over_bar
+            && self.menu.is_none()
             && (picking || resizing || (selecting && self.opts.loupe))
         {
             self.draw_loupe(&mut c);
@@ -301,6 +302,7 @@ impl Overlay {
         if let Some((msg, _)) = &self.flash {
             self.draw_pill(&mut c, msg, 70.0 * s, true);
         }
+        self.draw_menu(&mut c);
     }
 
     fn draw_lasso(&self, c: &mut Canvas, pts: &[Pt], closed: bool) {
