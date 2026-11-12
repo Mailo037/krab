@@ -317,6 +317,10 @@ fn draw_hud(win: &mut HudWin) {
     };
     win.hud
         .render(&mut buf, size.width, size.height, win.scale, win.hovered);
+    // Created hidden; show with the first frame so no white flashes first.
+    if win.window.is_visible() == Some(false) {
+        win.window.set_visible(true);
+    }
     let _ = buf.present();
 }
 
@@ -803,6 +807,7 @@ impl App {
             .with_resizable(false)
             .with_window_level(WindowLevel::AlwaysOnTop)
             .with_active(false)
+            .with_visible(false)
             .with_inner_size(PhysicalSize::new(w, h))
             .with_position(PhysicalPosition::new(x, y));
         #[cfg(windows)]
@@ -835,6 +840,8 @@ impl App {
             hovered: false,
         };
         draw_hud(&mut win);
+        // Fallback if the first frame could not be drawn.
+        win.window.set_visible(true);
         win.window.request_redraw();
         self.huds.push(win);
     }
@@ -1287,6 +1294,7 @@ impl App {
             // Krab draws its own title bar.
             .with_decorations(false)
             .with_resizable(false)
+            .with_visible(false)
             .with_window_icon(
                 winit::window::Icon::from_rgba(crate::brand::mark_rgba(64, true), 64, 64).ok(),
             );
@@ -1318,13 +1326,17 @@ impl App {
             crate::platform::autostart::is_enabled(),
             crate::platform::print_screen_opens_snipping_tool(),
         );
-        window.focus_window();
-        window.request_redraw();
-        self.settings = Some(SettingsWin {
+        let mut sw = SettingsWin {
             window,
             surface,
             ui,
-        });
+        };
+        draw_settings(&mut sw);
+        // Fallback if the first frame could not be drawn.
+        sw.window.set_visible(true);
+        sw.window.focus_window();
+        sw.window.request_redraw();
+        self.settings = Some(sw);
         if self.hotkeys.is_none() {
             self.reapply_hotkeys();
         }
@@ -1545,6 +1557,12 @@ fn draw_settings(sw: &mut SettingsWin) {
     };
     let scale = sw.window.scale_factor() as f32;
     sw.ui.render(&mut buf, size.width, size.height, scale);
+    // The window is created hidden so Windows never paints its default white
+    // background (seen as a white bar at the top); show it once the first
+    // frame is ready.
+    if sw.window.is_visible() == Some(false) {
+        sw.window.set_visible(true);
+    }
     let _ = buf.present();
 }
 impl ApplicationHandler<UserEvent> for App {
