@@ -1581,6 +1581,21 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Message(Message::Quit) => el.exit(),
             UserEvent::Message(Message::Ping) => {}
             UserEvent::Message(Message::Settings) => self.open_settings(el),
+            UserEvent::Message(Message::Updated(path)) => {
+                let path = std::path::PathBuf::from(path);
+                let same = |p: &Path| p.canonicalize().ok();
+                let mine = std::env::current_exe().ok().and_then(|p| same(&p));
+                // On Linux the running file was replaced, so compare names
+                // without the " (deleted)" the kernel appends.
+                let mine = mine.or_else(|| {
+                    std::env::current_exe()
+                        .ok()
+                        .map(|p| PathBuf::from(p.to_string_lossy().trim_end_matches(" (deleted)")))
+                });
+                if mine.is_some() && mine == same(&path).or(Some(path.clone())) {
+                    update::request_restart(path);
+                }
+            }
             UserEvent::TrayClick => self.request(el, Request::default()),
             UserEvent::Hotkey(id) => {
                 let slot = self.hotkeys.as_ref().and_then(|h| h.slot(id));

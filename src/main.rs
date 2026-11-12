@@ -303,16 +303,18 @@ fn run_update(args: &Args) -> Result<(), String> {
         Outcome::Updated { from, to, exe } => {
             println!("Updated Krab {from} -> {to}.");
             if restart_running_daemon(&exe) {
-                println!("The background instance was restarted.");
+                println!("A running Krab from this location restarts into the new version.");
             }
         }
     }
     Ok(())
 }
 
-/// Replace a running background instance with the freshly installed version.
+/// Tell a running background instance that `exe` was updated. It restarts
+/// into the new version only if it runs from that same file - a Krab that
+/// was started from somewhere else is left alone.
 fn restart_running_daemon(exe: &std::path::Path) -> bool {
-    ipc::send(&Message::Quit).is_ok() && update::spawn_daemon(exe).is_ok()
+    ipc::send(&Message::Updated(exe.display().to_string())).is_ok()
 }
 
 /// `krab --now`: full-screen capture without any UI.

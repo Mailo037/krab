@@ -38,6 +38,9 @@ pub enum Message {
     Quit,
     /// Open the settings window.
     Settings,
+    /// The program at this path was just updated: restart into it, but only
+    /// if that is the program this instance runs from.
+    Updated(String),
 }
 
 impl Message {
@@ -46,6 +49,7 @@ impl Message {
             Message::Ping => "ping".into(),
             Message::Quit => "quit".into(),
             Message::Settings => "settings".into(),
+            Message::Updated(path) => format!("updated {path}"),
             Message::Snip(r) => format!(
                 "snip mode={} kind={} delay={} quick={}",
                 r.mode.map(Mode::as_str).unwrap_or("default"),
@@ -70,6 +74,10 @@ impl Message {
             "ping" => Some(Message::Ping),
             "quit" => Some(Message::Quit),
             "settings" => Some(Message::Settings),
+            "updated" => {
+                let path = line.trim_start().strip_prefix("updated")?.trim();
+                (!path.is_empty()).then(|| Message::Updated(path.to_string()))
+            }
             "snip" => {
                 let mut r = Request::default();
                 for kv in parts {
@@ -172,6 +180,8 @@ mod tests {
         let cases = [
             Message::Ping,
             Message::Quit,
+            Message::Settings,
+            Message::Updated("C:\\Users\\a b\\AppData\\Local\\Programs\\Krab\\krab.exe".into()),
             Message::Snip(Request::default()),
             Message::Snip(Request {
                 mode: Some(Mode::Window),
