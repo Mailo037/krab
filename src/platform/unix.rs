@@ -123,3 +123,12 @@ impl Grabber {
         Ok(())
     }
 }
+
+/// Only Windows has a system snipping tool bound to Print Screen.
+pub fn print_screen_opens_snipping_tool() -> bool {
+    false
+}
+
+pub fn disable_snipping_tool_on_print_screen() -> std::io::Result<()> {
+    Ok(())
+}

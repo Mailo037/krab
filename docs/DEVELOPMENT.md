@@ -51,7 +51,7 @@ real desktops. Multi-monitor setups are supported by design but have mostly been
 ```text
 src/
   main.rs        entry point: CLI, hand-off to a running instance, cold-start capture thread
-  app.rs         winit event loop, overlay / status windows, tray icon, global hotkeys
+  app.rs         winit event loop, overlay / status / settings windows, tray icon
   overlay/       the capture UI as a pure state machine (input events in, pixels out)
   annotate.rs    markup objects: drawing and hit testing
   gfx/           canvas, text and icon rendering on a u32 pixel buffer
@@ -59,6 +59,8 @@ src/
   capture.rs     screen capture front end
   platform/      GDI capture on Windows, xcap on macOS / Linux, autostart
   hud.rs         toast, countdown and recording indicator
+  settings.rs    the settings window as a pure state machine (like the overlay)
+  hotkey.rs      global shortcuts: registration, conflict status, recording key presses
   record.rs      region recording (ffmpeg or GIF)
   ocr.rs         text extraction and QR codes
   ipc.rs         single-instance hand-off over a local socket / named pipe

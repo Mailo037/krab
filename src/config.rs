@@ -11,6 +11,11 @@ pub struct Config {
     pub hotkey: String,
     /// Second global hotkey (used when the first one is taken by the system).
     pub hotkey_alt: String,
+    /// Global hotkey that starts a screen recording.
+    pub hotkey_record: String,
+    /// Stay in the tray / menu bar after the first snip, so the next one
+    /// opens instantly and the hotkeys work.
+    pub run_in_background: bool,
     /// Snip mode used when none is given: rect, freeform, window or full.
     pub default_mode: String,
     /// What happens once an area is selected: "edit" keeps the overlay open
@@ -48,6 +53,8 @@ impl Default for Config {
         Self {
             hotkey: default_hotkey().into(),
             hotkey_alt: default_hotkey_alt().into(),
+            hotkey_record: default_hotkey_record().into(),
+            run_in_background: true,
             default_mode: "rect".into(),
             after_capture: "edit".into(),
             copy_to_clipboard: true,
@@ -84,7 +91,25 @@ fn default_hotkey_alt() -> &'static str {
     }
 }
 
+fn default_hotkey_record() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ""
+    } else {
+        "Alt+Shift+V"
+    }
+}
+
 impl Config {
+    /// Write the configuration to its file.
+    pub fn save(&self) -> std::io::Result<PathBuf> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, self.to_commented_toml())?;
+        Ok(path)
+    }
+
     /// `KRAB_CONFIG` overrides the default location.
     pub fn path() -> PathBuf {
         if let Some(p) = std::env::var_os("KRAB_CONFIG").filter(|p| !p.is_empty()) {
@@ -138,7 +163,8 @@ impl Config {
     pub fn to_commented_toml(&self) -> String {
         let body = toml::to_string_pretty(self).unwrap_or_default();
         format!(
-            "# Krab configuration. Restart Krab (tray > Quit, then start it again) after editing.\n\
+            "# Krab configuration. Most of it can be changed in the settings window (tray > Settings).\n\
+             # After editing this file by hand, restart Krab (tray > Quit, then start it again).\n\
              # hotkey examples: \"PrintScreen\", \"Alt+Shift+S\", \"Ctrl+Shift+KeyX\", \"\" to disable\n\
              # after_capture:   \"edit\" (annotate in place) or \"copy\" (copy immediately)\n\
              # default_mode:    rect | freeform | window | full\n\

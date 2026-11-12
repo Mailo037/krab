@@ -36,6 +36,8 @@ pub enum Message {
     Snip(Request),
     Ping,
     Quit,
+    /// Open the settings window.
+    Settings,
 }
 
 impl Message {
@@ -43,6 +45,7 @@ impl Message {
         match self {
             Message::Ping => "ping".into(),
             Message::Quit => "quit".into(),
+            Message::Settings => "settings".into(),
             Message::Snip(r) => format!(
                 "snip mode={} kind={} delay={} quick={}",
                 r.mode.map(Mode::as_str).unwrap_or("default"),
@@ -66,6 +69,7 @@ impl Message {
         match parts.next()? {
             "ping" => Some(Message::Ping),
             "quit" => Some(Message::Quit),
+            "settings" => Some(Message::Settings),
             "snip" => {
                 let mut r = Request::default();
                 for kv in parts {

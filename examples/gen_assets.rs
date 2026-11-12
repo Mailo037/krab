@@ -647,6 +647,33 @@ fn banner(shot: &[u32]) -> (Vec<u32>, u32, u32) {
     (px, w, h)
 }
 
+/// The settings window, with one shortcut taken by another app.
+fn scene_settings() -> (Vec<u32>, u32, u32) {
+    use krab::hotkey::Status;
+    let cfg = krab::config::Config {
+        hotkey: "PrintScreen".into(),
+        hotkey_alt: "Alt+Shift+S".into(),
+        hotkey_record: "Alt+Shift+V".into(),
+        // A neutral path instead of the machine's real one.
+        save_dir: "Pictures/Screenshots".into(),
+        ..Default::default()
+    };
+    let mut ui = krab::settings::Settings::new(
+        cfg,
+        [Status::Active, Status::Taken, Status::Active],
+        true,
+        false,
+    );
+    let s = 2.0;
+    let (w, h) = (
+        (krab::settings::SIZE.0 * s) as u32,
+        (krab::settings::SIZE.1 * s) as u32,
+    );
+    let mut px = vec![0u32; (w * h) as usize];
+    ui.render(&mut px, w, h, s);
+    (px, w, h)
+}
+
 /// PNG-compressed ICO with the usual Windows sizes.
 fn write_ico(path: &str) {
     let sizes = [16u32, 24, 32, 48, 64, 128, 256];
@@ -717,6 +744,8 @@ fn main() {
     );
     let (huds, hw, hh) = scene_huds(&snip);
     save("assets/screenshot-status.png", &huds, hw, hh);
+    let (st, sw, sh) = scene_settings();
+    save("assets/screenshot-settings.png", &st, sw, sh);
     let (b, bw, bh) = banner(&annotate);
     save("assets/banner.png", &b, bw, bh);
 }

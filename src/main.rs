@@ -83,7 +83,7 @@ fn main() -> ExitCode {
                 println!("Krab is already running in the background.");
                 Ok(())
             } else {
-                app::run(
+                run_app(
                     Config::load(),
                     Launch {
                         daemon: true,
@@ -92,13 +92,29 @@ fn main() -> ExitCode {
                         output: None,
                         quiet: args.quiet,
                         updated: args.updated,
+                        open_settings: false,
                         exit_after: args.exit_after_ms.map(Duration::from_millis),
                     },
                 )
-                .and_then(|()| match update::restart_requested() {
-                    Some(exe) => update::spawn_daemon(&exe),
-                    None => Ok(()),
-                })
+            }
+        }
+        Command::Settings => {
+            if ipc::send(&Message::Settings).is_ok() {
+                Ok(())
+            } else {
+                run_app(
+                    Config::load(),
+                    Launch {
+                        daemon: true,
+                        pending_capture: None,
+                        initial: None,
+                        output: None,
+                        quiet: true,
+                        updated: false,
+                        open_settings: true,
+                        exit_after: None,
+                    },
+                )
             }
         }
         Command::Snip(req) => snip(&args, req),
@@ -148,25 +164,44 @@ fn snip(args: &Args, req: Request) -> Result<(), String> {
         (None, Some(req))
     };
 
-    app::run(
-        Config::load(),
+    let cfg = Config::load();
+    // An interactive snip with nothing running in the background becomes the
+    // background instance, so Krab shows up in the tray and the shortcuts work.
+    let stay = cfg.run_in_background
+        && !args.standalone
+        && args.output.is_none()
+        && args.exit_after_ms.is_none();
+    let auto_update = cfg.auto_update;
+    run_app(
+        cfg,
         Launch {
-            daemon: false,
+            daemon: stay,
             pending_capture,
             initial,
             output: args.output.clone(),
             quiet: true,
             updated: false,
+            open_settings: false,
             exit_after: args.exit_after_ms.map(Duration::from_millis),
         },
     )?;
     // Without a background instance nobody else looks for updates. The check
     // runs in its own process once a day, after the snip is done.
-    if args.exit_after_ms.is_none() && update::due() && Config::load().auto_update {
+    if !stay && args.exit_after_ms.is_none() && update::due() && auto_update {
         update::mark_checked();
         update::spawn_background_check();
     }
     Ok(())
+}
+
+/// Run the event loop; if it stopped to make way for an update, start the
+/// new version as the background instance.
+fn run_app(cfg: Config, launch: Launch) -> Result<(), String> {
+    app::run(cfg, launch)?;
+    match update::restart_requested() {
+        Some(exe) => update::spawn_daemon(&exe),
+        None => Ok(()),
+    }
 }
 
 /// `krab --update`, typed by the user or started by [`snip`].

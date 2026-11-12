@@ -191,7 +191,7 @@ impl Hud {
 }
 
 /// Trim `text` with an ellipsis so it fits `max_w`.
-fn ellipsize(text: &str, em: f32, max_w: f32) -> String {
+pub fn ellipsize(text: &str, em: f32, max_w: f32) -> String {
     let face = text::ui();
     if face.measure(text, em) <= max_w {
         return text.to_string();

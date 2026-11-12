@@ -302,3 +302,101 @@ pub fn hide_console(cmd: &mut std::process::Command) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
+
+// ---- Windows' own Print Screen snipping ---------------------------------------
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+const KEYBOARD_KEY: &str = "Control Panel\\Keyboard";
+const SNIP_VALUE: &str = "PrintScreenKeyForSnippingEnabled";
+
+/// Whether Windows opens its own Snipping Tool on Print Screen (and so
+/// competes with a Krab shortcut on that key). Windows 11 does this by default
+/// when the setting was never touched.
+pub fn print_screen_opens_snipping_tool() -> bool {
+    use windows_sys::Win32::System::Registry::{
+        RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
+    };
+    let (key, name) = (wide(KEYBOARD_KEY), wide(SNIP_VALUE));
+    let mut value: u32 = 0;
+    let mut len = size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            &mut value as *mut u32 as *mut c_void,
+            &mut len,
+        )
+    };
+    if status == 0 {
+        return value != 0;
+    }
+    // Never set: on by default from Windows 11 (build 22000) on.
+    let (key, name) = (
+        wide("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion"),
+        wide("CurrentBuildNumber"),
+    );
+    let mut buf = [0u16; 16];
+    let mut len = (buf.len() * 2) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            null_mut(),
+            buf.as_mut_ptr() as *mut c_void,
+            &mut len,
+        )
+    };
+    if status != 0 {
+        return false;
+    }
+    let end = buf.iter().position(|c| *c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+        .parse::<u32>()
+        .is_ok_and(|build| build >= 22000)
+}
+
+/// Turn off "Use the Print Screen key to open screen capture" (the same
+/// switch as in Settings > Accessibility > Keyboard).
+pub fn disable_snipping_tool_on_print_screen() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Registry::{RegSetKeyValueW, HKEY_CURRENT_USER, REG_DWORD};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+    };
+    let (key, name) = (wide(KEYBOARD_KEY), wide(SNIP_VALUE));
+    let value: u32 = 0;
+    let status = unsafe {
+        RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            REG_DWORD,
+            &value as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32));
+    }
+    // Tell running programs (Explorer) that a setting changed.
+    let area = wide("Keyboard");
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            area.as_ptr() as LPARAM,
+            SMTO_ABORTIFHUNG,
+            1000,
+            null_mut(),
+        );
+    }
+    Ok(())
+}

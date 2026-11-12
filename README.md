@@ -46,6 +46,9 @@ Screen recording and status feedback:
 ![Recording](assets/screenshot-record.png)
 ![Status surfaces](assets/screenshot-status.png)
 
+Settings in one window - shortcuts, what happens after a snip, and the app itself:
+
+<p align="center"><img src="assets/screenshot-settings.png" alt="Settings window" width="540"></p>
 
 ## Features
 
@@ -68,7 +71,9 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Text extraction (OCR) and QR codes | yes - see notes below |
 | Screen recording | yes, MP4 with ffmpeg or GIF without - no audio |
 | Open the snip in another app | yes (system default app) |
-| Global hotkey, tray icon, start with the system | yes (Windows, macOS) |
+| Tray / menu bar icon and start with the system | yes |
+| Global shortcuts for snips and recording, changeable in the settings | yes (Linux: on X11) |
+| Settings window | yes |
 | Optional border around every snip | yes |
 | Multiple monitors | yes, one overlay per monitor (one selection at a time) |
 | Command line and scripting | yes |
@@ -91,17 +96,22 @@ Krab keeps itself up to date - see [Updates](#updates).
 
 ### Platform notes
 
-**Windows** - start `krab --daemon` once (or enable *Start with system* in the tray menu). Krab then lives in the
-tray and listens for `PrintScreen` and `Alt+Shift+S`. If Windows itself uses `PrintScreen` for its own snipping
-tool, turn that off under *Settings > Accessibility > Keyboard*, or just use `Alt+Shift+S`.
+After the first snip Krab stays in the tray (the menu bar on macOS), so the shortcuts work and the next snip
+opens instantly. Click the icon for a snip, or open its menu for everything else, including **Settings**.
+Turn on *Start when I log in* in the settings to have it there right away.
+
+**Windows** - the shortcuts are `PrintScreen` and `Alt+Shift+S` for a snip and `Alt+Shift+V` for a recording.
+Windows 11 puts new tray icons into the overflow menu (the `^` arrow); drag Krab onto the taskbar to keep it in
+sight. If Windows opens its own Snipping Tool on `PrintScreen`, the settings window offers to turn that off.
 
 **macOS** - the first capture asks for the *Screen Recording* permission (System Settings > Privacy & Security).
 The binary is not signed; remove the quarantine flag after downloading: `xattr -d com.apple.quarantine krab`.
-Default hotkey: `Cmd+Shift+2`. After an update macOS may ask for the permission once more.
+Default shortcut: `Cmd+Shift+2`. After an update macOS may ask for the permission once more.
 
-**Linux** - bind the `krab` command to a key in your desktop's keyboard settings; that works on both X11 and
-Wayland (Wayland does not allow applications to register global hotkeys themselves). Running `krab --daemon`
-in the background makes those launches faster. Screen capture on Wayland uses PipeWire 1.0 or newer.
+**Linux** - the tray icon appears on KDE, Xfce, Cinnamon, Budgie and Ubuntu's desktop; on plain GNOME it needs
+the *AppIndicator* extension. Shortcuts set in Krab's settings work on X11. Wayland does not let applications
+register shortcuts, so there bind the `krab` command (or `krab --record`) to a key in your desktop's keyboard
+settings. Screen capture on Wayland uses PipeWire 1.0 or newer.
 
 **Text extraction** uses the OCR engine built into Windows. On macOS and Linux it calls
 [`tesseract`](https://github.com/tesseract-ocr/tesseract) if it is installed. QR codes are decoded by Krab itself
@@ -124,7 +134,8 @@ version as soon as you are not in the middle of a snip or a recording, and tells
 
 ```text
 krab [MODE] [OPTIONS]      take a snip
-krab --daemon              run in the background (tray icon + global hotkey)
+krab --daemon              run in the background (tray icon + global shortcuts)
+krab --settings            open the settings window
 
 MODES:
     rect          drag a rectangle (default)
@@ -182,11 +193,19 @@ On macOS use `Cmd` instead of `Ctrl`.
 
 ### Configuration
 
-`krab --config` opens `config.toml` (created with defaults on first use). Set `KRAB_CONFIG` to use a different file.
+Everything below can be changed in the settings window (tray menu > *Settings*, or `krab --settings`); changes
+apply immediately. The values live in `config.toml` - `krab --config` opens it, and `KRAB_CONFIG` points Krab
+to a different file.
+
+To change a shortcut, click it in the settings and press the new keys (`Esc` cancels, `Backspace` removes it).
+Each shortcut shows whether it works; if another app already uses the combination, it says so and you can pick
+another one or clear it with the `x` button.
 
 ```toml
 hotkey = "PrintScreen"
 hotkey_alt = "Alt+Shift+S"
+hotkey_record = "Alt+Shift+V"     # start / stop a screen recording
+run_in_background = true       # stay in the tray after the first snip
 default_mode = "rect"          # rect | freeform | window | full
 after_capture = "edit"         # "edit" = annotate in place, "copy" = copy immediately
 copy_to_clipboard = true

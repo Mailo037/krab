@@ -1,6 +1,6 @@
 [package]
 name = "krab"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Krab - a lightweight snipping tool that opens in milliseconds"
 license = "MIT"
@@ -35,6 +35,7 @@ open = "5"
 interprocess = "2"
 rqrr = "0.10"
 sha2 = { version = "0.10", default-features = false }
+global-hotkey = "0.7"
 
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }
@@ -64,10 +65,10 @@ xcap = "0.9"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 tray-icon = "0.21"
-global-hotkey = "0.7"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify-rust = "4"
+ksni = { version = "0.3", default-features = false, features = ["async-io", "blocking"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

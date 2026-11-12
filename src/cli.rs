@@ -13,6 +13,8 @@ pub enum Command {
     Daemon,
     Quit,
     OpenConfig,
+    /// Open the settings window (starting the background instance if needed).
+    Settings,
     Autostart(bool),
     /// Check for a new version and install it.
     Update,
@@ -72,6 +74,7 @@ BACKGROUND INSTANCE:
         --daemon               start it
         --quit                 stop it
         --autostart <on|off>   start Krab when you log in
+        --settings             open the settings window
         --config               open the configuration file
         --update               install the newest version now
 
@@ -104,6 +107,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             "--daemon" | "daemon" | "--tray" | "tray" => command = Some(Command::Daemon),
             "--quit" | "quit" => command = Some(Command::Quit),
             "--config" | "config" => command = Some(Command::OpenConfig),
+            "--settings" | "settings" => command = Some(Command::Settings),
             "--update" | "update" => command = Some(Command::Update),
             "--background" => out.background = true,
             "--updated" => out.updated = true,
@@ -216,6 +220,7 @@ mod tests {
         );
         assert_eq!(p("-V").unwrap().command, Command::Version);
         assert_eq!(p("--update").unwrap().command, Command::Update);
+        assert_eq!(p("--settings").unwrap().command, Command::Settings);
         let a = p("--daemon --updated").unwrap();
         assert!(a.updated && a.command == Command::Daemon);
     }

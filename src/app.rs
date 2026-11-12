@@ -4,6 +4,7 @@
 use crate::capture::{self, Capture, Shot};
 use crate::config::Config;
 use crate::geom::RectI;
+use crate::hotkey::{self, Hotkeys, Slot};
 use crate::hud::Hud;
 use crate::ipc::{Message, Request};
 use crate::output::{self, Image};
@@ -11,6 +12,7 @@ use crate::overlay::{
     self, Button, CursorKind, Finish, Kind, Mode, Mods, Options, Outcome, Overlay, Shared,
 };
 use crate::record::Recorder;
+use crate::settings::{self, Settings};
 use crate::trace;
 use crate::update;
 use std::num::NonZeroU32;
@@ -33,7 +35,8 @@ type Surface = softbuffer::Surface<OwnedDisplayHandle, Rc<Window>>;
 pub enum UserEvent {
     Captured(Box<Result<Capture, String>>, Request),
     Message(Message),
-    Hotkey,
+    /// A global shortcut was pressed (its id).
+    Hotkey(u32),
     Menu(String),
     TrayClick,
     RecordingDone(Result<PathBuf, String>),
@@ -55,6 +58,8 @@ pub struct Launch {
     pub quiet: bool,
     /// This background instance replaces one that installed an update.
     pub updated: bool,
+    /// Open the settings window right away.
+    pub open_settings: bool,
     pub exit_after: Option<Duration>,
 }
 
@@ -136,8 +141,18 @@ pub struct App {
     /// Testing aid: when to cancel the open overlay automatically.
     session_deadline: Option<Instant>,
     started: bool,
-    #[cfg(any(windows, target_os = "macos"))]
     tray: Option<tray::Tray>,
+    hotkeys: Option<Hotkeys>,
+    hotkey_status: [hotkey::Status; 3],
+    settings: Option<SettingsWin>,
+    /// Modifier keys, as the settings window sees them.
+    key_mods: hotkey::Mods,
+}
+
+struct SettingsWin {
+    window: Rc<Window>,
+    surface: Surface,
+    ui: Settings,
 }
 
 pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
@@ -175,8 +190,15 @@ pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
         last_monitor: None,
         session_deadline: None,
         started: false,
-        #[cfg(any(windows, target_os = "macos"))]
         tray: None,
+        hotkeys: None,
+        hotkey_status: [
+            hotkey::Status::Off,
+            hotkey::Status::Off,
+            hotkey::Status::Off,
+        ],
+        settings: None,
+        key_mods: hotkey::Mods::default(),
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
@@ -324,6 +346,7 @@ impl App {
             && self.recorder.is_none()
             && self.busy == 0
             && self.pending.is_none()
+            && self.settings.is_none()
     }
 
     /// Make sure a hidden overlay window exists for every connected monitor.
@@ -1108,27 +1131,8 @@ impl App {
                 let _ = std::fs::create_dir_all(&dir);
                 output::open_path(&dir);
             }
-            "config" => {
-                if let Ok(path) = Config::ensure_file() {
-                    output::open_path(&path);
-                }
-            }
-            "autostart" => {
-                let enable = !crate::platform::autostart::is_enabled();
-                let _ = crate::platform::autostart::set(enable);
-                #[cfg(any(windows, target_os = "macos"))]
-                if let Some(tray) = &self.tray {
-                    tray.autostart
-                        .set_checked(crate::platform::autostart::is_enabled());
-                }
-            }
-            "update" => {
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    update::mark_checked();
-                    let _ = proxy.send_event(UserEvent::Update(update::check_and_install(), true));
-                });
-            }
+            "settings" | "config" => self.open_settings(el),
+            "update" => self.check_for_updates(),
             "quit" => el.exit(),
             _ => {}
         }
@@ -1160,14 +1164,49 @@ impl App {
         });
     }
 
+    fn check_for_updates(&mut self) {
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            update::mark_checked();
+            let _ = proxy.send_event(UserEvent::Update(update::check_and_install(), true));
+        });
+    }
+
     fn start_daemon(&mut self, el: &ActiveEventLoop) {
         let proxy = self.proxy.clone();
         if let Err(e) = crate::ipc::listen(move |msg| {
             let _ = proxy.send_event(UserEvent::Message(msg));
         }) {
+            // Another instance owns the background role; finish what this one
+            // was started for and leave.
             eprintln!("krab: could not listen for requests: {e}");
+            self.launch.daemon = false;
+            return;
         }
         self.start_update_checks();
+
+        let mut hotkeys = Hotkeys::new();
+        self.hotkey_status = hotkeys.apply(&self.cfg);
+        self.hotkeys = Some(hotkeys);
+        let p = self.proxy.clone();
+        global_hotkey::GlobalHotKeyEvent::set_event_handler(Some(
+            move |e: global_hotkey::GlobalHotKeyEvent| {
+                if e.state() == global_hotkey::HotKeyState::Pressed {
+                    let _ = p.send_event(UserEvent::Hotkey(e.id()));
+                }
+            },
+        ));
+
+        let snip_key = self.active_snip_hotkey();
+        match tray::Tray::create(
+            snip_key.as_deref(),
+            self.cfg.delay_seconds,
+            self.proxy.clone(),
+        ) {
+            Ok(t) => self.tray = Some(t),
+            Err(e) => eprintln!("krab: tray unavailable: {e}"),
+        }
+
         if self.launch.updated {
             self.toast(
                 el,
@@ -1176,31 +1215,295 @@ impl App {
                 None,
                 None,
             );
+        } else if !self.launch.quiet {
+            let detail = match snip_key {
+                Some(h) => format!("Press {} to take a snip", hotkey::display(&h)),
+                None if self.tray.is_some() => "Click the tray icon to take a snip".into(),
+                None => "Run krab to take a snip".into(),
+            };
+            self.toast(el, "Krab is running".into(), detail, None, None);
         }
-        #[cfg(any(windows, target_os = "macos"))]
+        if self.launch.open_settings {
+            self.open_settings(el);
+        }
+    }
+
+    /// The first working "new snip" shortcut, as written in the config.
+    fn active_snip_hotkey(&self) -> Option<String> {
+        [Slot::Snip, Slot::SnipAlt]
+            .into_iter()
+            .zip(&self.hotkey_status)
+            .find(|(_, st)| **st == hotkey::Status::Active)
+            .map(|(slot, _)| slot.get(&self.cfg).to_string())
+    }
+
+    fn reapply_hotkeys(&mut self) {
+        if let Some(h) = &mut self.hotkeys {
+            self.hotkey_status = h.apply(&self.cfg);
+        } else {
+            // A one-shot instance registers nothing; still report typos.
+            let mut h = Hotkeys::new();
+            self.hotkey_status = h.apply(&self.cfg);
+            h.suspend();
+        }
+        let snip_key = self.active_snip_hotkey();
+        if let Some(t) = &self.tray {
+            t.set_hotkey(snip_key.as_deref());
+        }
+        if let Some(sw) = &mut self.settings {
+            sw.ui.status = self.hotkey_status.clone();
+            sw.ui.invalidate();
+        }
+    }
+
+    // ---- settings window ---------------------------------------------------
+
+    fn open_settings(&mut self, el: &ActiveEventLoop) {
+        if let Some(sw) = &self.settings {
+            sw.window.set_minimized(false);
+            sw.window.focus_window();
+            return;
+        }
+        let (w, h) = settings::SIZE;
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut attrs = Window::default_attributes()
+            .with_title("Krab Settings")
+            .with_inner_size(winit::dpi::LogicalSize::new(w, h))
+            .with_min_inner_size(winit::dpi::LogicalSize::new(w, 360.0))
+            .with_resizable(true)
+            .with_window_icon(
+                winit::window::Icon::from_rgba(crate::brand::mark_rgba(64, true), 64, 64).ok(),
+            );
+        #[cfg(windows)]
         {
-            match tray::Tray::create(&self.cfg, self.proxy.clone()) {
-                Ok(tray) => {
-                    if !self.launch.quiet && !self.launch.updated {
-                        let detail = match tray.hotkeys.first() {
-                            Some(h) => format!("Press {h} to take a snip"),
-                            None => "Click the tray icon to take a snip".into(),
-                        };
-                        self.toast(el, "Krab is running".into(), detail, None, None);
-                    }
-                    self.tray = Some(tray);
-                }
-                Err(e) => eprintln!("krab: tray unavailable: {e}"),
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs
+                .with_taskbar_icon(
+                    winit::window::Icon::from_rgba(crate::brand::mark_rgba(64, true), 64, 64).ok(),
+                )
+                .with_drag_and_drop(false);
+        }
+        let Ok(window) = el.create_window(attrs) else {
+            return;
+        };
+        let window = Rc::new(window);
+        let Some(context) = self.context(el) else {
+            return;
+        };
+        let Ok(surface) = softbuffer::Surface::new(context, window.clone()) else {
+            return;
+        };
+        let ui = Settings::new(
+            self.cfg.clone(),
+            self.hotkey_status.clone(),
+            crate::platform::autostart::is_enabled(),
+            crate::platform::print_screen_opens_snipping_tool(),
+        );
+        window.focus_window();
+        window.request_redraw();
+        self.settings = Some(SettingsWin {
+            window,
+            surface,
+            ui,
+        });
+        if self.hotkeys.is_none() {
+            self.reapply_hotkeys();
+        }
+    }
+
+    fn close_settings(&mut self) {
+        if let Some(sw) = self.settings.take() {
+            if sw.ui.is_recording() {
+                self.reapply_hotkeys();
             }
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            let _ = el;
-            eprintln!("krab: running in the background. Bind `krab` to a keyboard shortcut in your desktop settings.");
+    }
+
+    fn settings_event(&mut self, event: WindowEvent) {
+        let Some(sw) = self.settings.as_mut() else {
+            return;
+        };
+        let scale = sw.window.scale_factor() as f32;
+        let mut actions = Vec::new();
+        match event {
+            WindowEvent::RedrawRequested => {
+                draw_settings(sw);
+                return;
+            }
+            WindowEvent::CloseRequested => {
+                self.close_settings();
+                return;
+            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                sw.ui.invalidate();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                sw.ui
+                    .pointer_moved(position.x as f32 / scale, position.y as f32 / scale);
+                sw.window.set_cursor(if sw.ui.hovering_control() {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::Default
+                });
+            }
+            WindowEvent::CursorLeft { .. } => sw.ui.pointer_left(),
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => actions = sw.ui.click(),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 48.0,
+                };
+                sw.ui.scroll(lines);
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                let st = m.state();
+                self.key_mods = hotkey::Mods {
+                    ctrl: st.control_key(),
+                    alt: st.alt_key(),
+                    shift: st.shift_key(),
+                    meta: st.super_key(),
+                };
+                sw.ui.modifiers(self.key_mods);
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::{KeyCode, PhysicalKey};
+                let PhysicalKey::Code(code) = event.physical_key else {
+                    return;
+                };
+                // Windows reports only the release of Print Screen.
+                let pressed = event.state == ElementState::Pressed
+                    || (code == KeyCode::PrintScreen && !event.repeat);
+                if !pressed || event.repeat {
+                    return;
+                }
+                if !sw.ui.is_recording() && code == KeyCode::Escape {
+                    self.close_settings();
+                    return;
+                }
+                actions = sw.ui.key(code, self.key_mods);
+            }
+            _ => return,
+        }
+        if sw.ui.take_dirty() {
+            sw.window.request_redraw();
+        }
+        for action in actions {
+            self.settings_action(action);
+        }
+    }
+
+    fn settings_action(&mut self, action: settings::Action) {
+        use settings::Action;
+        match action {
+            Action::Save => {
+                if let Some(sw) = &self.settings {
+                    self.cfg = sw.ui.cfg.clone();
+                }
+                if let Err(e) = self.cfg.save() {
+                    eprintln!("krab: could not save the settings: {e}");
+                }
+                self.reapply_hotkeys();
+            }
+            Action::SuspendHotkeys => {
+                if let Some(h) = &mut self.hotkeys {
+                    h.suspend();
+                }
+            }
+            Action::ResumeHotkeys => self.reapply_hotkeys(),
+            Action::PickFolder => {
+                let current = self.cfg.save_dir();
+                let mut dialog = rfd::FileDialog::new().set_title("Save snips to");
+                if current.is_dir() {
+                    dialog = dialog.set_directory(&current);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    if let Some(sw) = &mut self.settings {
+                        sw.ui.cfg.save_dir = dir.display().to_string();
+                    }
+                    self.settings_action(Action::Save);
+                }
+            }
+            Action::OpenConfigFile => {
+                if let Ok(path) = Config::ensure_file() {
+                    output::open_path(&path);
+                }
+            }
+            Action::CheckForUpdates => self.check_for_updates(),
+            Action::SetAutostart(on) => {
+                if let Err(e) = crate::platform::autostart::set(on) {
+                    eprintln!("krab: autostart: {e}");
+                }
+                if let Some(sw) = &mut self.settings {
+                    sw.ui.autostart = crate::platform::autostart::is_enabled();
+                }
+            }
+            Action::DisableWindowsSnipping => {
+                let result = crate::platform::disable_snipping_tool_on_print_screen();
+                if let Some(sw) = &mut self.settings {
+                    sw.ui.windows_snipping = crate::platform::print_screen_opens_snipping_tool();
+                    sw.ui.update_note = match result {
+                        Ok(()) => "Print Screen now belongs to Krab".into(),
+                        Err(e) => format!("Could not change the Windows setting: {e}"),
+                    };
+                }
+            }
+        }
+        if let Some(sw) = &mut self.settings {
+            sw.ui.invalidate();
+            sw.window.request_redraw();
         }
     }
 }
 
+impl App {
+    fn update_result(
+        &mut self,
+        el: &ActiveEventLoop,
+        result: Result<update::Outcome, String>,
+        manual: bool,
+    ) {
+        let in_settings = self.settings.is_some();
+        match result {
+            Ok(update::Outcome::Updated { exe, .. }) => {
+                // Restarts into the new version as soon as nothing is
+                // in progress; the new instance confirms the update.
+                update::request_restart(exe);
+            }
+            Ok(update::Outcome::UpToDate(v)) if manual && !in_settings => self.toast(
+                el,
+                "Krab is up to date".into(),
+                format!("Version {v} is the newest"),
+                None,
+                None,
+            ),
+            Ok(_) => {}
+            Err(e) if manual && !in_settings => {
+                self.toast(el, "Update failed".into(), e, None, None)
+            }
+            Err(e) => eprintln!("krab: update check failed: {e}"),
+        }
+    }
+}
+
+fn draw_settings(sw: &mut SettingsWin) {
+    let size = sw.window.inner_size();
+    let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+        return;
+    };
+    if sw.surface.resize(w, h).is_err() {
+        return;
+    }
+    let Ok(mut buf) = sw.surface.buffer_mut() else {
+        return;
+    };
+    let scale = sw.window.scale_factor() as f32;
+    sw.ui.render(&mut buf, size.width, size.height, scale);
+    let _ = buf.present();
+}
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.started {
@@ -1234,7 +1537,20 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Message(Message::Snip(req)) => self.request(el, req),
             UserEvent::Message(Message::Quit) => el.exit(),
             UserEvent::Message(Message::Ping) => {}
-            UserEvent::Hotkey | UserEvent::TrayClick => self.request(el, Request::default()),
+            UserEvent::Message(Message::Settings) => self.open_settings(el),
+            UserEvent::TrayClick => self.request(el, Request::default()),
+            UserEvent::Hotkey(id) => {
+                let slot = self.hotkeys.as_ref().and_then(|h| h.slot(id));
+                let req = match slot {
+                    Some(Slot::Record) => Request {
+                        kind: Kind::Record,
+                        ..Request::default()
+                    },
+                    Some(_) => Request::default(),
+                    None => return,
+                };
+                self.request(el, req);
+            }
             UserEvent::Menu(id) => self.menu(el, &id),
             UserEvent::RecordingDone(result) => {
                 self.recorder = None;
@@ -1275,23 +1591,20 @@ impl ApplicationHandler<UserEvent> for App {
                     Err(e) => self.toast(el, "Could not read text".into(), e, None, None),
                 }
             }
-            UserEvent::Update(result, manual) => match result {
-                Ok(update::Outcome::Updated { exe, .. }) => {
-                    // Restarts into the new version as soon as nothing is
-                    // in progress; the new instance confirms the update.
-                    update::request_restart(exe);
+            UserEvent::Update(result, manual) => {
+                if let Some(sw) = &mut self.settings {
+                    sw.ui.update_note = match &result {
+                        Ok(update::Outcome::Updated { to, .. }) => {
+                            format!("Version {to} installed - restarts when this window closes")
+                        }
+                        Ok(update::Outcome::UpToDate(v)) => format!("Version {v} is the newest"),
+                        Err(e) => format!("Update failed: {e}"),
+                    };
+                    sw.ui.invalidate();
+                    sw.window.request_redraw();
                 }
-                Ok(update::Outcome::UpToDate(v)) if manual => self.toast(
-                    el,
-                    "Krab is up to date".into(),
-                    format!("Version {v} is the newest"),
-                    None,
-                    None,
-                ),
-                Ok(_) => {}
-                Err(e) if manual => self.toast(el, "Update failed".into(), e, None, None),
-                Err(e) => eprintln!("krab: update check failed: {e}"),
-            },
+                self.update_result(el, result, manual);
+            }
         }
     }
 
@@ -1304,6 +1617,8 @@ impl ApplicationHandler<UserEvent> for App {
             self.overlay_event(el, idx, event);
         } else if let Some(idx) = self.huds.iter().position(|h| h.window.id() == id) {
             self.hud_event(idx, event);
+        } else if self.settings.as_ref().is_some_and(|s| s.window.id() == id) {
+            self.settings_event(event);
         }
     }
 
@@ -1323,86 +1638,69 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+/// The tray icon (Windows notification area, macOS menu bar, Linux
+/// StatusNotifierItem) and its menu.
 mod tray {
     use super::UserEvent;
-    use crate::config::Config;
-    use global_hotkey::hotkey::HotKey;
-    use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
-    use std::str::FromStr;
-    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
-    use tray_icon::{
-        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
-    };
     use winit::event_loop::EventLoopProxy;
 
-    pub struct Tray {
-        _icon: TrayIcon,
-        _manager: Option<GlobalHotKeyManager>,
-        pub autostart: CheckMenuItem,
-        /// Hotkeys that were registered successfully, as written in the config.
-        pub hotkeys: Vec<String>,
+    /// Menu entries: (id, label). `None` is a separator.
+    fn entries(snip_hotkey: Option<&str>, delay: u32) -> Vec<Option<(&'static str, String)>> {
+        let snip = match snip_hotkey {
+            Some(h) if cfg!(windows) => format!("New snip\t{}", crate::hotkey::display(h)),
+            Some(h) => format!("New snip ({})", crate::hotkey::display(h)),
+            None => "New snip".into(),
+        };
+        vec![
+            Some(("snip", snip)),
+            None,
+            Some(("rect", "Rectangle".into())),
+            Some(("window", "Window".into())),
+            Some(("full", "Full screen".into())),
+            Some(("freeform", "Freeform".into())),
+            None,
+            Some(("delay", format!("Snip in {delay} seconds"))),
+            Some(("record", "Record screen".into())),
+            None,
+            Some(("folder", "Open screenshots folder".into())),
+            Some(("settings", "Settings...".into())),
+            Some(("update", "Check for updates".into())),
+            None,
+            Some(("quit", "Quit Krab".into())),
+        ]
     }
 
-    impl Tray {
-        pub fn create(cfg: &Config, proxy: EventLoopProxy<UserEvent>) -> Result<Tray, String> {
-            // Global hotkeys first, so the menu can show which one is live.
-            let manager = GlobalHotKeyManager::new().ok();
-            let mut hotkeys = Vec::new();
-            if let Some(manager) = &manager {
-                for spec in [&cfg.hotkey, &cfg.hotkey_alt] {
-                    let spec = spec.trim();
-                    if spec.is_empty() {
-                        continue;
-                    }
-                    match HotKey::from_str(spec) {
-                        Ok(hk) if manager.register(hk).is_ok() => hotkeys.push(spec.to_string()),
-                        Ok(_) => {
-                            eprintln!("krab: hotkey '{spec}' is already in use by another program")
-                        }
-                        Err(e) => eprintln!("krab: cannot parse hotkey '{spec}': {e}"),
-                    }
-                }
-            }
-            let p = proxy.clone();
-            GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
-                if e.state() == HotKeyState::Pressed {
-                    let _ = p.send_event(UserEvent::Hotkey);
-                }
-            }));
+    #[cfg(any(windows, target_os = "macos"))]
+    pub struct Tray {
+        icon: tray_icon::TrayIcon,
+        snip: tray_icon::menu::MenuItem,
+    }
 
-            let item = |id: &str, text: &str| MenuItem::with_id(id, text, true, None);
-            let snip_label = match hotkeys.first() {
-                Some(h) => format!("New snip\t{h}"),
-                None => "New snip".to_string(),
-            };
-            let autostart = CheckMenuItem::with_id(
-                "autostart",
-                "Start with system",
-                true,
-                crate::platform::autostart::is_enabled(),
-                None,
-            );
+    #[cfg(any(windows, target_os = "macos"))]
+    impl Tray {
+        pub fn create(
+            snip_hotkey: Option<&str>,
+            delay: u32,
+            proxy: EventLoopProxy<UserEvent>,
+        ) -> Result<Tray, String> {
+            use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+            use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
             let menu = Menu::new();
-            menu.append_items(&[
-                &item("snip", &snip_label),
-                &PredefinedMenuItem::separator(),
-                &item("rect", "Rectangle"),
-                &item("window", "Window"),
-                &item("full", "Full screen"),
-                &item("freeform", "Freeform"),
-                &PredefinedMenuItem::separator(),
-                &item("delay", &format!("Snip in {} seconds", cfg.delay_seconds)),
-                &item("record", "Record screen"),
-                &PredefinedMenuItem::separator(),
-                &item("folder", "Open screenshots folder"),
-                &item("config", "Settings..."),
-                &autostart,
-                &item("update", "Check for updates"),
-                &PredefinedMenuItem::separator(),
-                &item("quit", "Quit Krab"),
-            ])
-            .map_err(|e| e.to_string())?;
+            let mut snip = None;
+            for entry in entries(snip_hotkey, delay) {
+                match entry {
+                    None => menu.append(&PredefinedMenuItem::separator()),
+                    Some((id, label)) => {
+                        let item = MenuItem::with_id(id, &label, true, None);
+                        if id == "snip" {
+                            snip = Some(item.clone());
+                        }
+                        menu.append(&item)
+                    }
+                }
+                .map_err(|e| e.to_string())?;
+            }
 
             let p = proxy.clone();
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
@@ -1423,23 +1721,134 @@ mod tray {
             let size = 64;
             let icon = Icon::from_rgba(crate::brand::mark_rgba(size, false), size, size)
                 .map_err(|e| e.to_string())?;
-            let tooltip = match hotkeys.first() {
-                Some(h) => format!("Krab - {h} to snip"),
-                None => "Krab".to_string(),
-            };
-            let tray = TrayIconBuilder::new()
+            let icon = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 .with_menu_on_left_click(false)
-                .with_tooltip(tooltip)
+                .with_tooltip(tooltip(snip_hotkey))
                 .with_icon(icon)
                 .build()
                 .map_err(|e| e.to_string())?;
             Ok(Tray {
-                _icon: tray,
-                _manager: manager,
-                autostart,
-                hotkeys,
+                icon,
+                snip: snip.ok_or("menu without snip entry")?,
             })
+        }
+
+        /// Show the current snip shortcut in the menu and tooltip.
+        pub fn set_hotkey(&self, snip_hotkey: Option<&str>) {
+            if let Some(Some((_, label))) = entries(snip_hotkey, 0).into_iter().next() {
+                self.snip.set_text(label);
+            }
+            let _ = self.icon.set_tooltip(Some(tooltip(snip_hotkey)));
+        }
+    }
+
+    fn tooltip(snip_hotkey: Option<&str>) -> String {
+        match snip_hotkey {
+            Some(h) => format!("Krab - {} to snip", crate::hotkey::display(h)),
+            None => "Krab".to_string(),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub struct Tray {
+        handle: ksni::blocking::Handle<Sni>,
+    }
+
+    #[cfg(target_os = "linux")]
+    pub struct Sni {
+        proxy: EventLoopProxy<UserEvent>,
+        snip_hotkey: Option<String>,
+        delay: u32,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl ksni::Tray for Sni {
+        fn id(&self) -> String {
+            "krab".into()
+        }
+
+        fn title(&self) -> String {
+            "Krab".into()
+        }
+
+        fn category(&self) -> ksni::Category {
+            ksni::Category::ApplicationStatus
+        }
+
+        fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+            [22u32, 32, 48, 64]
+                .iter()
+                .map(|&size| {
+                    // StatusNotifierItem wants ARGB32 in network byte order.
+                    let rgba = crate::brand::mark_rgba(size, false);
+                    let data = rgba
+                        .chunks_exact(4)
+                        .flat_map(|p| [p[3], p[0], p[1], p[2]])
+                        .collect();
+                    ksni::Icon {
+                        width: size as i32,
+                        height: size as i32,
+                        data,
+                    }
+                })
+                .collect()
+        }
+
+        fn tool_tip(&self) -> ksni::ToolTip {
+            ksni::ToolTip {
+                title: tooltip(self.snip_hotkey.as_deref()),
+                ..Default::default()
+            }
+        }
+
+        fn activate(&mut self, _x: i32, _y: i32) {
+            let _ = self.proxy.send_event(UserEvent::TrayClick);
+        }
+
+        fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+            use ksni::menu::StandardItem;
+            entries(self.snip_hotkey.as_deref(), self.delay)
+                .into_iter()
+                .map(|e| match e {
+                    None => ksni::MenuItem::Separator,
+                    Some((id, label)) => StandardItem {
+                        label,
+                        activate: Box::new(move |t: &mut Sni| {
+                            let _ = t.proxy.send_event(UserEvent::Menu(id.to_string()));
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                })
+                .collect()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Tray {
+        pub fn create(
+            snip_hotkey: Option<&str>,
+            delay: u32,
+            proxy: EventLoopProxy<UserEvent>,
+        ) -> Result<Tray, String> {
+            use ksni::blocking::TrayMethods;
+            let sni = Sni {
+                proxy,
+                snip_hotkey: snip_hotkey.map(str::to_string),
+                delay,
+            };
+            // Desktops without a tray (plain GNOME) simply do not show it.
+            let handle = sni
+                .assume_sni_available(true)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+            Ok(Tray { handle })
+        }
+
+        pub fn set_hotkey(&self, snip_hotkey: Option<&str>) {
+            let h = snip_hotkey.map(str::to_string);
+            self.handle.update(move |t| t.snip_hotkey = h);
         }
     }
 }
