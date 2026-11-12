@@ -1,6 +1,6 @@
 [package]
 name = "krab"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Krab - a lightweight snipping tool that opens in milliseconds"
 license = "MIT"
@@ -34,6 +34,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 open = "5"
 interprocess = "2"
 rqrr = "0.10"
+sha2 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 qrcode = { version = "0.14", default-features = false }

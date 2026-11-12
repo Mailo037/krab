@@ -7,6 +7,7 @@ use krab::cli::{self, Args, Command};
 use krab::config::Config;
 use krab::ipc::{self, Message, Request};
 use krab::output::{self, Image};
+use krab::update::{self, Outcome};
 use krab::{capture, platform, trace};
 use std::process::ExitCode;
 use std::sync::mpsc;
@@ -67,7 +68,16 @@ fn main() -> ExitCode {
                     println!("Start with system: {}", if on { "on" } else { "off" });
                 })
         }
+        Command::Update => run_update(&args),
         Command::Daemon => {
+            if args.updated {
+                // The instance that installed the update is shutting down;
+                // wait until it has let go of the single-instance socket.
+                let deadline = std::time::Instant::now() + Duration::from_secs(15);
+                while ipc::send(&Message::Ping).is_ok() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
             if ipc::send(&Message::Ping).is_ok() {
                 platform::attach_console();
                 println!("Krab is already running in the background.");
@@ -81,9 +91,14 @@ fn main() -> ExitCode {
                         initial: None,
                         output: None,
                         quiet: args.quiet,
+                        updated: args.updated,
                         exit_after: args.exit_after_ms.map(Duration::from_millis),
                     },
                 )
+                .and_then(|()| match update::restart_requested() {
+                    Some(exe) => update::spawn_daemon(&exe),
+                    None => Ok(()),
+                })
             }
         }
         Command::Snip(req) => snip(&args, req),
@@ -141,9 +156,49 @@ fn snip(args: &Args, req: Request) -> Result<(), String> {
             initial,
             output: args.output.clone(),
             quiet: true,
+            updated: false,
             exit_after: args.exit_after_ms.map(Duration::from_millis),
         },
-    )
+    )?;
+    // Without a background instance nobody else looks for updates. The check
+    // runs in its own process once a day, after the snip is done.
+    if args.exit_after_ms.is_none() && update::due() && Config::load().auto_update {
+        update::mark_checked();
+        update::spawn_background_check();
+    }
+    Ok(())
+}
+
+/// `krab --update`, typed by the user or started by [`snip`].
+fn run_update(args: &Args) -> Result<(), String> {
+    if args.background {
+        update::cleanup();
+        // A failed automatic check is retried tomorrow; nothing to report.
+        if let Ok(Outcome::Updated { exe, .. }) = update::check_and_install() {
+            // A background instance that started in the meantime keeps
+            // running the old version until it restarts; ask it to.
+            restart_running_daemon(&exe);
+        }
+        return Ok(());
+    }
+    platform::attach_console();
+    println!("Checking for updates...");
+    update::mark_checked();
+    match update::check_and_install()? {
+        Outcome::UpToDate(v) => println!("Krab {v} is the newest version."),
+        Outcome::Updated { from, to, exe } => {
+            println!("Updated Krab {from} -> {to}.");
+            if restart_running_daemon(&exe) {
+                println!("The background instance was restarted.");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replace a running background instance with the freshly installed version.
+fn restart_running_daemon(exe: &std::path::Path) -> bool {
+    ipc::send(&Message::Quit).is_ok() && update::spawn_daemon(exe).is_ok()
 }
 
 /// `krab --now`: full-screen capture without any UI.

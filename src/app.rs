@@ -12,6 +12,7 @@ use crate::overlay::{
 };
 use crate::record::Recorder;
 use crate::trace;
+use crate::update;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -37,6 +38,8 @@ pub enum UserEvent {
     TrayClick,
     RecordingDone(Result<PathBuf, String>),
     TextExtracted(Result<String, String>),
+    /// An update check finished; `true` when the user asked for it.
+    Update(Result<update::Outcome, String>, bool),
 }
 
 /// How this process was started.
@@ -50,6 +53,8 @@ pub struct Launch {
     pub initial: Option<Request>,
     pub output: Option<PathBuf>,
     pub quiet: bool,
+    /// This background instance replaces one that installed an update.
+    pub updated: bool,
     pub exit_after: Option<Duration>,
 }
 
@@ -1117,9 +1122,42 @@ impl App {
                         .set_checked(crate::platform::autostart::is_enabled());
                 }
             }
+            "update" => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    update::mark_checked();
+                    let _ = proxy.send_event(UserEvent::Update(update::check_and_install(), true));
+                });
+            }
             "quit" => el.exit(),
             _ => {}
         }
+    }
+
+    /// Look for a new version shortly after start and then once a day.
+    fn start_update_checks(&self) {
+        let enabled = self.cfg.auto_update && update::enabled_here();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            update::cleanup();
+            if !enabled {
+                return;
+            }
+            // Stay out of the way while the desktop is still starting up.
+            std::thread::sleep(Duration::from_secs(20));
+            loop {
+                if update::due() {
+                    update::mark_checked();
+                    let result = update::check_and_install();
+                    let installed = matches!(result, Ok(update::Outcome::Updated { .. }));
+                    let _ = proxy.send_event(UserEvent::Update(result, false));
+                    if installed {
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_secs(60 * 60));
+            }
+        });
     }
 
     fn start_daemon(&mut self, el: &ActiveEventLoop) {
@@ -1129,11 +1167,21 @@ impl App {
         }) {
             eprintln!("krab: could not listen for requests: {e}");
         }
+        self.start_update_checks();
+        if self.launch.updated {
+            self.toast(
+                el,
+                format!("Krab was updated to {}", env!("CARGO_PKG_VERSION")),
+                "The new version is running".into(),
+                None,
+                None,
+            );
+        }
         #[cfg(any(windows, target_os = "macos"))]
         {
             match tray::Tray::create(&self.cfg, self.proxy.clone()) {
                 Ok(tray) => {
-                    if !self.launch.quiet {
+                    if !self.launch.quiet && !self.launch.updated {
                         let detail = match tray.hotkeys.first() {
                             Some(h) => format!("Press {h} to take a snip"),
                             None => "Click the tray icon to take a snip".into(),
@@ -1227,6 +1275,23 @@ impl ApplicationHandler<UserEvent> for App {
                     Err(e) => self.toast(el, "Could not read text".into(), e, None, None),
                 }
             }
+            UserEvent::Update(result, manual) => match result {
+                Ok(update::Outcome::Updated { exe, .. }) => {
+                    // Restarts into the new version as soon as nothing is
+                    // in progress; the new instance confirms the update.
+                    update::request_restart(exe);
+                }
+                Ok(update::Outcome::UpToDate(v)) if manual => self.toast(
+                    el,
+                    "Krab is up to date".into(),
+                    format!("Version {v} is the newest"),
+                    None,
+                    None,
+                ),
+                Ok(_) => {}
+                Err(e) if manual => self.toast(el, "Update failed".into(), e, None, None),
+                Err(e) => eprintln!("krab: update check failed: {e}"),
+            },
         }
     }
 
@@ -1247,7 +1312,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.deliver(el, kind, img);
         }
         self.tick(el);
-        if !self.launch.daemon && self.idle() {
+        if (!self.launch.daemon || update::restart_requested().is_some()) && self.idle() {
             el.exit();
             return;
         }
@@ -1333,6 +1398,7 @@ mod tray {
                 &item("folder", "Open screenshots folder"),
                 &item("config", "Settings..."),
                 &autostart,
+                &item("update", "Check for updates"),
                 &PredefinedMenuItem::separator(),
                 &item("quit", "Quit Krab"),
             ])

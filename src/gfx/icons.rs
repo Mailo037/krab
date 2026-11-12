@@ -1,13 +1,30 @@
-//! Krab's icon set: original line icons defined on a 24x24 grid.
+//! Krab's icon set: original, soft line icons defined on a 24x24 grid.
 //!
-//! Icons are described with a tiny path language (a subset of SVG path data
-//! plus `O cx cy r` for circles and `R x y w h radius` for rounded rects),
-//! parsed once on first use and drawn as vectors at any scale.
+//! Icons are described with a tiny path language - a subset of SVG path data
+//! plus a few shapes that make rounded geometry easy to write:
+//!
+//! | command               | meaning                                              |
+//! |-----------------------|------------------------------------------------------|
+//! | `M x y`               | move to                                              |
+//! | `L x y`               | line to (further pairs are more line-tos)            |
+//! | `Q cx cy x y`         | quadratic curve                                      |
+//! | `C c1x c1y c2x c2y x y` | cubic curve                                        |
+//! | `Z`                   | close the current figure                             |
+//! | `O cx cy r`           | circle                                               |
+//! | `R x y w h r`         | rectangle with corner radius `r`                     |
+//! | `P r x y x y ...`     | open polyline, every inner corner rounded by `r`     |
+//! | `G r x y x y ...`     | closed polygon, every corner rounded by `r`          |
+//!
+//! Sources are parsed once on first use and drawn as vectors at any scale.
+//! `docs/ICONS.md` explains the style rules and how to add an icon.
 
 use super::{push_rrect, Canvas, Color};
 use crate::geom::{Pt, RectF};
 use std::sync::OnceLock;
 use tiny_skia::{BlendMode, FillRule, LineCap, LineJoin, Path, PathBuilder, Stroke, Transform};
+
+/// Stroke width on the 24px grid.
+pub const STROKE: f32 = 1.9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(usize)]
@@ -46,78 +63,165 @@ pub enum Icon {
 const COUNT: usize = Icon::Folder as usize + 1;
 
 /// (stroked geometry, filled geometry)
-fn source(icon: Icon) -> (&'static str, &'static str) {
+pub fn source(icon: Icon) -> (&'static str, &'static str) {
     match icon {
-        Icon::Pointer => ("M6 3.5 L6 18 L10 14.4 L12.6 20.2 L15 19.1 L12.4 13.4 L17.6 13 Z", ""),
+        Icon::Pointer => ("G 1.6 6 3.8 6 18 10 14.6 12.5 20 15.2 18.8 12.6 13.4 17.6 13", ""),
         Icon::Pen => (
-            "M4 20 L5 15.6 L15.8 4.8 Q17 3.6 18.2 4.8 L19.2 5.8 Q20.4 7 19.2 8.2 L8.4 19 Z M13.8 6.8 L17.2 10.2",
+            "M6.1 14.8 L15.4 5.4 Q17 3.9 18.6 5.4 Q20.1 7 18.6 8.6 L9.2 17.9 L5.7 19.1 \
+             Q4.5 19.5 4.9 18.3 Z M13.6 7.3 L16.7 10.4",
             "",
         ),
         Icon::Highlighter => (
-            "M9.2 13.4 L15.4 4.8 L19.6 7.9 L13.4 16.5 Z M9.2 13.4 L8 17.2 L10.6 19.1 L13.4 16.5 M4 21 L11.5 21",
+            "G 1.8 9.2 13.4 15.4 4.8 19.6 7.9 13.4 16.5 P 1.2 9.2 13.4 8 17.2 10.6 19.1 13.4 16.5 \
+             M4.5 20.5 L11 20.5",
             "",
         ),
         Icon::Line => ("M5 19 L19 5", ""),
-        Icon::Arrow => ("M5 19 L19 5 M10.5 5 L19 5 L19 13.5", ""),
-        Icon::Rect => ("R 4 5.5 16 13 2.5", ""),
+        Icon::Arrow => ("M5 19 L18.4 5.6 P 2.6 10.5 5 19 5 19 13.5", ""),
+        Icon::Rect => ("R 4 5.5 16 13 4", ""),
         Icon::Ellipse => ("O 12 12 8", ""),
-        Icon::Text => ("M5.5 7.5 L5.5 5 L18.5 5 L18.5 7.5 M12 5 L12 19 M9.5 19 L14.5 19", ""),
-        Icon::Pixelate => ("R 13.2 4.5 6.3 6.3 1.2 R 4.5 13.2 6.3 6.3 1.2", "R 3.8 3.8 7.7 7.7 1.6 R 12.5 12.5 7.7 7.7 1.6"),
+        Icon::Text => (
+            "P 2 5.5 8 5.5 5 18.5 5 18.5 8 M12 5 L12 19 M9.5 19 L14.5 19",
+            "",
+        ),
+        Icon::Pixelate => (
+            "R 13.2 4.5 6.3 6.3 2.2 R 4.5 13.2 6.3 6.3 2.2",
+            "R 3.8 3.8 7.7 7.7 2.6 R 12.5 12.5 7.7 7.7 2.6",
+        ),
         Icon::Eraser => (
-            "M13.6 4.6 Q14.6 3.6 15.6 4.6 L20.4 9.4 Q21.4 10.4 20.4 11.4 L12.3 19.5 L8 19.5 L4.4 15.9 Q3.4 14.9 4.4 13.9 Z M9 9.2 L15.8 16 M12.3 19.5 L20.5 19.5",
+            "G 2 14.6 3.8 21 10.2 12.2 19 8.3 19 3.8 14.5 M9.2 9.2 L15.6 15.6 M12.2 19 L20 19",
             "",
         ),
         Icon::Pipette => (
-            "M13.2 10.8 L6 18 L4.5 19.5 M11.2 8.2 L15.8 12.8 M14.6 9.4 L17.2 6.8 Q18.6 5.4 17.2 4 M14.6 9.4 L12.4 7.2 M17.2 6.8 Q18.6 5.4 20 6.8 Q21.4 8.2 20 9.6 L17.4 12.2",
+            "G 2.2 15.8 11.4 20.2 7 17 3.8 12.6 8.2 M10.4 8.4 L15.6 13.6 M13 11 L5.6 18.4 L4.6 19.4",
             "",
         ),
         Icon::Undo => (
-            "M8.5 14 L4 9.5 L8.5 5 M4 9.5 L14.5 9.5 C17.5 9.5 20 11.7 20 14.5 C20 17.3 17.5 19.5 14.5 19.5 L11 19.5",
+            "P 2.2 8.5 14 4 9.5 8.5 5 M4 9.5 L14.5 9.5 C17.5 9.5 20 11.7 20 14.5 \
+             C20 17.3 17.5 19.5 14.5 19.5 L11 19.5",
             "",
         ),
         Icon::Redo => (
-            "M15.5 14 L20 9.5 L15.5 5 M20 9.5 L9.5 9.5 C6.5 9.5 4 11.7 4 14.5 C4 17.3 6.5 19.5 9.5 19.5 L13 19.5",
+            "P 2.2 15.5 14 20 9.5 15.5 5 M20 9.5 L9.5 9.5 C6.5 9.5 4 11.7 4 14.5 \
+             C4 17.3 6.5 19.5 9.5 19.5 L13 19.5",
             "",
         ),
         Icon::TextScan => (
-            "M4 8.5 L4 6.5 Q4 4.5 6 4.5 L8 4.5 M16 4.5 L18 4.5 Q20 4.5 20 6.5 L20 8.5 M20 15.5 L20 17.5 Q20 19.5 18 19.5 L16 19.5 M8 19.5 L6 19.5 Q4 19.5 4 17.5 L4 15.5 M8 9.5 L16 9.5 M8 14.5 L13.5 14.5",
+            "P 3.2 4 9 4 4.5 8.5 4.5 P 3.2 15.5 4.5 20 4.5 20 9 \
+             P 3.2 20 15 20 19.5 15.5 19.5 P 3.2 8.5 19.5 4 19.5 4 15 \
+             M8 9.5 L16 9.5 M8 14.5 L13.5 14.5",
             "",
         ),
         Icon::External => (
-            "M18 13.5 L18 18 Q18 20 16 20 L6 20 Q4 20 4 18 L4 8 Q4 6 6 6 L10.5 6 M14.5 4 L20 4 L20 9.5 M20 4 L11 13",
+            "P 3.2 18 13.5 18 20 4 20 4 6 10.5 6 P 2.4 14.5 4 20 4 20 9.5 M19.2 4.8 L11 13",
             "",
         ),
-        Icon::Save => ("M12 4 L12 15 M7.5 10.5 L12 15 L16.5 10.5 M5 19.5 L19 19.5", ""),
-        Icon::Copy => ("R 9 9 11 11 2.2 M5.5 15 Q4 15 4 13.5 L4 6 Q4 4 6 4 L13.5 4 Q15 4 15 5.5", ""),
+        Icon::Save => (
+            "M12 4 L12 14.6 P 2.4 7.5 10.5 12 15 16.5 10.5 M5 19.5 L19 19.5",
+            "",
+        ),
+        Icon::Copy => (
+            "R 9 9 11 11 3.2 P 2.6 5.5 15 4 15 4 4 15 4 15 5.5",
+            "",
+        ),
         Icon::Close => ("M6.5 6.5 L17.5 17.5 M17.5 6.5 L6.5 17.5", ""),
-        Icon::Check => ("M5 12.5 L10 17.5 L19 7", ""),
+        Icon::Check => ("P 1.6 5 12.5 10 17.5 19 7", ""),
         Icon::ModeRect => (
-            "M4 9 L4 7.5 Q4 6 5.5 6 L7.5 6 M16.5 6 L18.5 6 Q20 6 20 7.5 L20 9 M20 15 L20 16.5 Q20 18 18.5 18 L16.5 18 M7.5 18 L5.5 18 Q4 18 4 16.5 L4 15 M10.5 6 L13.5 6 M10.5 18 L13.5 18 M4 11.3 L4 12.7 M20 11.3 L20 12.7",
+            "P 2.6 4 9 4 6 7.5 6 P 2.6 16.5 6 20 6 20 9 P 2.6 20 15 20 18 16.5 18 \
+             P 2.6 7.5 18 4 18 4 15 M10.5 6 L13.5 6 M10.5 18 L13.5 18 \
+             M4 11.4 L4 12.6 M20 11.4 L20 12.6",
             "",
         ),
         Icon::ModeFreeform => (
-            "M12.5 4.5 C17 4.5 20.5 7 20.5 10.3 C20.5 13.8 16.5 16 12 16 C7.5 16 3.5 14 3.5 10.5 C3.5 7 7.5 4.5 12.5 4.5 M8 15.3 C8.6 17.6 7.6 19.4 5 20.2",
+            "M12.5 4.5 C17 4.5 20.5 7 20.5 10.3 C20.5 13.8 16.5 16 12 16 C7.5 16 3.5 14 3.5 10.5 \
+             C3.5 7 7.5 4.5 12.5 4.5 M8 15.3 C8.6 17.6 7.6 19.4 5 20.2",
             "",
         ),
-        Icon::ModeWindow => ("R 3.5 5 17 14 2.5 M3.5 9.5 L20.5 9.5", "O 6.4 7.3 0.7 O 8.9 7.3 0.7"),
-        Icon::ModeFull => ("R 3.5 4.5 17 12 2 M8.5 20 L15.5 20 M12 16.5 L12 20", ""),
-        Icon::Timer => ("O 12 13.5 7 M12 10 L12 13.5 L14.3 15.4 M9.8 3.5 L14.2 3.5", ""),
+        Icon::ModeWindow => (
+            "R 3.5 5 17 14 3.6 M3.5 9.6 L20.5 9.6",
+            "O 6.7 7.3 0.8 O 9.2 7.3 0.8",
+        ),
+        Icon::ModeFull => (
+            "R 3.5 4.5 17 12 3.2 M8.5 20 L15.5 20 M12 16.5 L12 20",
+            "",
+        ),
+        Icon::Timer => (
+            "O 12 13.5 7 P 1.4 12 10 12 13.5 14.3 15.4 M10 3.5 L14 3.5 M18.2 6.8 L19.4 5.6",
+            "",
+        ),
         Icon::Camera => (
-            "M3.5 9 Q3.5 7 5.5 7 L7.6 7 L9.2 4.8 L14.8 4.8 L16.4 7 L18.5 7 Q20.5 7 20.5 9 L20.5 17 Q20.5 19 18.5 19 L5.5 19 Q3.5 19 3.5 17 Z O 12 13 3.3",
+            "G 2.4 3.5 7 7.6 7 9.4 4.8 14.6 4.8 16.4 7 20.5 7 20.5 19 3.5 19 O 12 12.9 3.3",
             "",
         ),
-        Icon::Video => ("R 3 6.5 12.5 11 2.5 M15.5 10.8 L21 7.8 L21 16.2 L15.5 13.2", ""),
-        Icon::Stop => ("", "R 6.5 6.5 11 11 2.5"),
+        Icon::Video => (
+            "R 3 6.5 12.5 11 3.6 G 1.6 15.5 10.6 21 7.6 21 16.4 15.5 13.4",
+            "",
+        ),
+        Icon::Stop => ("", "R 6.5 6.5 11 11 3.6"),
         Icon::Dot => ("", "O 12 12 5.5"),
         Icon::Folder => (
-            "M3.5 7 Q3.5 5 5.5 5 L9.3 5 L11.5 7.5 L18.5 7.5 Q20.5 7.5 20.5 9.5 L20.5 17 Q20.5 19 18.5 19 L5.5 19 Q3.5 19 3.5 17 Z",
+            "G 2.4 3.5 5 9.4 5 11.5 7.5 20.5 7.5 20.5 19 3.5 19 M3.5 10 L20.5 10",
             "",
         ),
     }
 }
 
-fn parse(src: &str) -> Option<Path> {
-    if src.is_empty() {
+/// Append a polyline through `pts` whose corners are rounded by `radius`.
+///
+/// Each corner is replaced by a quadratic curve that starts and ends `radius`
+/// away from the corner along its two edges. The radius shrinks on short
+/// edges: an edge shared by two corners gives each of them at most half its
+/// length, an edge ending in a free end point gives its whole length.
+pub fn push_rounded(pb: &mut PathBuilder, pts: &[(f32, f32)], radius: f32, closed: bool) {
+    let n = pts.len();
+    if n < 2 {
+        return;
+    }
+    let p = |i: usize| Pt::new(pts[i % n].0, pts[i % n].1);
+    let dist = |a: Pt, b: Pt| ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+    let toward = |from: Pt, to: Pt, t: f32| {
+        let d = dist(from, to).max(1e-6);
+        Pt::new(
+            from.x + (to.x - from.x) * t / d,
+            from.y + (to.y - from.y) * t / d,
+        )
+    };
+    // Rounded corner at vertex `i`, entering from `a` and leaving to `b`.
+    let corner = |pb: &mut PathBuilder, a: Pt, v: Pt, b: Pt, share_a: f32, share_b: f32| {
+        let t = radius
+            .min(dist(a, v) * share_a)
+            .min(dist(v, b) * share_b)
+            .max(0.0);
+        let p1 = toward(v, a, t);
+        let p2 = toward(v, b, t);
+        pb.line_to(p1.x, p1.y);
+        pb.quad_to(v.x, v.y, p2.x, p2.y);
+    };
+
+    if closed {
+        if n < 3 {
+            return;
+        }
+        // Start halfway along the last edge so every vertex is a corner.
+        let (a, b) = (p(n - 1), p(0));
+        pb.move_to((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+        for i in 0..n {
+            corner(pb, p(i + n - 1), p(i), p(i + 1), 0.5, 0.5);
+        }
+        pb.close();
+    } else {
+        pb.move_to(pts[0].0, pts[0].1);
+        for i in 1..n - 1 {
+            let share_a = if i == 1 { 1.0 } else { 0.5 };
+            let share_b = if i == n - 2 { 1.0 } else { 0.5 };
+            corner(pb, p(i - 1), p(i), p(i + 1), share_a, share_b);
+        }
+        pb.line_to(pts[n - 1].0, pts[n - 1].1);
+    }
+}
+
+pub fn parse(src: &str) -> Option<Path> {
+    if src.trim().is_empty() {
         return None;
     }
     let mut pb = PathBuilder::new();
@@ -133,9 +237,11 @@ fn parse(src: &str) -> Option<Path> {
         })
         .collect();
     let mut tokens = spaced.split_whitespace().peekable();
+    let is_cmd =
+        |t: &str| t.len() == 1 && t.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
     let mut cmd = ' ';
     while let Some(tok) = tokens.peek().copied() {
-        if tok.len() == 1 && tok.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        if is_cmd(tok) {
             cmd = tok.chars().next().unwrap();
             tokens.next();
             if cmd == 'Z' {
@@ -169,6 +275,19 @@ fn parse(src: &str) -> Option<Path> {
             'R' => {
                 let (x, y, w, h, r) = (num(), num(), num(), num(), num());
                 push_rrect(&mut pb, RectF::new(x, y, w, h), r);
+            }
+            'P' | 'G' => {
+                let radius = num();
+                let mut values = Vec::new();
+                while let Some(t) = tokens.peek().copied() {
+                    if is_cmd(t) {
+                        break;
+                    }
+                    values.push(t.parse::<f32>().unwrap_or(0.0));
+                    tokens.next();
+                }
+                let pts: Vec<(f32, f32)> = values.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+                push_rounded(&mut pb, &pts, radius, cmd == 'G');
             }
             _ => {
                 tokens.next();
@@ -234,7 +353,7 @@ pub fn draw(c: &mut Canvas, icon: Icon, center: Pt, size: f32, color: Color) {
     if let Some(p) = stroke_path {
         let stroke = Stroke {
             // Keep strokes from getting hairline-thin on 1x displays.
-            width: (1.7f32).max(1.35 / k),
+            width: STROKE.max(1.4 / k),
             line_cap: LineCap::Round,
             line_join: LineJoin::Round,
             ..Stroke::default()
@@ -269,5 +388,23 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn rounded_corners_never_overshoot_short_edges() {
+        // A 2-unit square with a radius of 5 must stay a 2-unit square.
+        let p = parse("G 5 10 10 12 10 12 12 10 12").unwrap();
+        let b = p.bounds();
+        assert!((b.left() - 10.0).abs() < 0.01 && (b.right() - 12.0).abs() < 0.01);
+        assert!((b.top() - 10.0).abs() < 0.01 && (b.bottom() - 12.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn open_polyline_keeps_its_end_points() {
+        let p = parse("P 3 4 4 12 4 12 12").unwrap();
+        let pts: Vec<_> = p.points().to_vec();
+        let (first, last) = (pts[0], pts[pts.len() - 1]);
+        assert_eq!((first.x, first.y), (4.0, 4.0));
+        assert_eq!((last.x, last.y), (12.0, 12.0));
     }
 }

@@ -16,3 +16,4 @@ pub mod overlay;
 pub mod platform;
 pub mod record;
 pub mod trace;
+pub mod update;

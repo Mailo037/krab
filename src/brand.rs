@@ -2,7 +2,8 @@
 //! banner without shipping any bitmap assets.
 
 use crate::geom::{Pt, RectF};
-use crate::gfx::{premul_argb_to_rgba, rrect_path, theme, Canvas, Color};
+use crate::gfx::icons::push_rounded;
+use crate::gfx::{premul_argb_to_rgba, theme, Canvas, Color};
 use tiny_skia::{
     BlendMode, FillRule, LineCap, LineJoin, Path, PathBuilder, Rect, Stroke, Transform,
 };
@@ -39,6 +40,28 @@ fn seg(pts: &[(f32, f32)]) -> Option<Path> {
     pb.finish()
 }
 
+/// A continuous-curvature rounded square (superellipse, n = 5): rounder than
+/// a plain rounded rectangle, the shape app icons use on modern desktops.
+fn squircle(r: RectF) -> Option<Path> {
+    let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+    let (ax, ay) = (r.w / 2.0, r.h / 2.0);
+    let mut pb = PathBuilder::new();
+    const STEPS: usize = 160;
+    for i in 0..STEPS {
+        let t = i as f32 / STEPS as f32 * std::f32::consts::TAU;
+        let (s, c) = t.sin_cos();
+        let x = cx + ax * c.signum() * c.abs().powf(2.0 / 5.0);
+        let y = cy + ay * s.signum() * s.abs().powf(2.0 / 5.0);
+        if i == 0 {
+            pb.move_to(x, y);
+        } else {
+            pb.line_to(x, y);
+        }
+    }
+    pb.close();
+    pb.finish()
+}
+
 /// Draw the mark into `r`. With `badge` the crab sits on a dark rounded tile
 /// (app icon); without it only the crab is drawn (tray icon, inline logo).
 pub fn draw_mark(c: &mut Canvas, r: RectF, badge: bool) {
@@ -47,7 +70,7 @@ pub fn draw_mark(c: &mut Canvas, r: RectF, badge: bool) {
 
     if badge {
         let tile = RectF::new(x0, y0, size, size);
-        if let Some(p) = rrect_path(tile, size * 0.225) {
+        if let Some(p) = squircle(tile) {
             c.fill_path_gradient(
                 &p,
                 Pt::new(x0, y0),
@@ -80,33 +103,22 @@ pub fn draw_mark(c: &mut Canvas, r: RectF, badge: bool) {
     };
 
     if badge {
-        // Selection corners: the "grab".
-        let m = 4.0;
-        let l = 15.0;
+        // Selection corners: the "grab", with soft rounded bends.
+        let (m, l) = (4.0, 15.0);
         let col = Color::rgba(255, 255, 255, 235);
-        line(c, &[(m, m + l), (m, m), (m + l, m)], 4.2, col);
-        line(
-            c,
-            &[(100.0 - m - l, m), (100.0 - m, m), (100.0 - m, m + l)],
-            4.2,
-            col,
-        );
-        line(
-            c,
-            &[
-                (100.0 - m, 100.0 - m - l),
-                (100.0 - m, 100.0 - m),
-                (100.0 - m - l, 100.0 - m),
-            ],
-            4.2,
-            col,
-        );
-        line(
-            c,
-            &[(m + l, 100.0 - m), (m, 100.0 - m), (m, 100.0 - m - l)],
-            4.2,
-            col,
-        );
+        let far = 100.0 - m;
+        for pts in [
+            [(m, m + l), (m, m), (m + l, m)],
+            [(far - l, m), (far, m), (far, m + l)],
+            [(far, far - l), (far, far), (far - l, far)],
+            [(m + l, far), (m, far), (m, far - l)],
+        ] {
+            let mut pb = PathBuilder::new();
+            push_rounded(&mut pb, &pts, 7.0, false);
+            if let Some(p) = pb.finish() {
+                c.stroke_path_ex(&p, &stroke(4.6), col, BlendMode::SourceOver, ts);
+            }
+        }
     }
 
     // Legs.
@@ -137,11 +149,17 @@ pub fn draw_mark(c: &mut Canvas, r: RectF, badge: bool) {
         SHELL_DARK,
     );
     // Claws, raised and open towards each other.
-    if let Some(p) = claw(21.0, 29.0, 13.5, -52.0, 62.0) {
+    // Fill plus a round-joined outline in the same colour softens the
+    // pincer tips and the notch between them.
+    for p in [
+        claw(21.0, 29.0, 12.0, -52.0, 62.0),
+        claw(79.0, 29.0, 12.0, -128.0, 62.0),
+    ]
+    .into_iter()
+    .flatten()
+    {
         c.fill_path_ex(&p, SHELL, FillRule::Winding, ts);
-    }
-    if let Some(p) = claw(79.0, 29.0, 13.5, -128.0, 62.0) {
-        c.fill_path_ex(&p, SHELL, FillRule::Winding, ts);
+        c.stroke_path_ex(&p, &stroke(3.6), SHELL, BlendMode::SourceOver, ts);
     }
     // Eye stalks.
     line(c, &[(42.5, 48.0), (40.5, 37.0)], 4.6, SHELL_DARK);
