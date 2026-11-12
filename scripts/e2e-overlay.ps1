@@ -1,4 +1,6 @@
 # End-to-end check of the real overlay on Windows, driven with synthetic input.
+# Takes over the mouse and keyboard for a few seconds; the clipboard is not touched.
+# Usage: scripts/e2e-overlay.ps1 -Exe target/release/krab.exe
 param([string]$Exe)
 
 $ErrorActionPreference = 'Stop'
@@ -45,12 +47,12 @@ function Png-Size($path) {
     "${w}x${h}"
 }
 
-function Run-Case($name, $afterCapture, [scriptblock]$drive) {
+function Run-Case($name, $afterCapture, [scriptblock]$drive, [string[]]$extra = @()) {
     $cfg = Join-Path $tmp "$name.toml"
     $out = Join-Path $tmp "$name.png"
     "copy_to_clipboard = false`nauto_save = false`nnotifications = false`nafter_capture = `"$afterCapture`"" | Set-Content $cfg
     $env:KRAB_CONFIG = $cfg
-    $p = Start-Process -FilePath $Exe -ArgumentList "--standalone", "-o", $out -PassThru
+    $p = Start-Process -FilePath $Exe -ArgumentList (@("--standalone", "-o", $out) + $extra) -PassThru
     # Only inject input once Krab's overlay really is the foreground window.
     $ready = $false
     foreach ($i in 1..40) {
@@ -80,6 +82,16 @@ Run-Case "edit-double-click" "edit" {
         [Inp]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 60
     }
 }
+Run-Case "window-click" "copy" { [Inp]::SetCursorPos(600, 400) | Out-Null; Start-Sleep -Milliseconds 120; [Inp]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 30; [Inp]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero) } @("window")
+Run-Case "freeform-lasso" "copy" {
+    [Inp]::SetCursorPos(500, 300) | Out-Null; Start-Sleep -Milliseconds 80
+    [Inp]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero); Start-Sleep -Milliseconds 40
+    foreach ($pt in @(@(700, 600), @(300, 600), @(500, 300))) {
+        foreach ($i in 1..10) { [Inp]::SetCursorPos(0, 0) | Out-Null; [Inp]::SetCursorPos($pt[0], $pt[1]) | Out-Null; Start-Sleep -Milliseconds 12 }
+    }
+    [Inp]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
+} @("freeform")
+Run-Case "full-screen" "copy" { } @("full")
 Run-Case "escape-cancels" "edit" { [Inp]::Key(0x1B) }
 Run-Case "right-click-cancels" "edit" {
     [Inp]::SetCursorPos(500, 500) | Out-Null; Start-Sleep -Milliseconds 80

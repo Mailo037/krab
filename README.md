@@ -96,7 +96,7 @@ Download the archive for your system from the
 |---|---|
 | Windows 10 / 11 (x64) | `krab-windows-x64.zip` |
 | macOS 11+ (Apple silicon and Intel) | `krab-macos-universal.tar.gz` |
-| Linux (x86_64, X11 or Wayland) | `krab-linux-x86_64.tar.gz` |
+| Linux (x86_64, X11 or Wayland, glibc 2.39+ such as Ubuntu 24.04) | `krab-linux-x86_64.tar.gz` |
 
 Or build it yourself:
 
@@ -127,8 +127,10 @@ in the background makes those launches faster. Build dependencies on Debian / Ub
 
 ```sh
 sudo apt install pkg-config libclang-dev libxcb1-dev libxrandr-dev libdbus-1-dev \
-                 libpipewire-0.3-dev libwayland-dev libegl-dev
+                 libpipewire-0.3-dev libwayland-dev libegl-dev libgbm-dev
 ```
+
+Building needs PipeWire 1.0 or newer (Ubuntu 24.04, Fedora 40, current Arch).
 
 **Text extraction** uses the OCR engine built into Windows. On macOS and Linux it calls
 [`tesseract`](https://github.com/tesseract-ocr/tesseract) if it is installed. QR codes are decoded by Krab itself

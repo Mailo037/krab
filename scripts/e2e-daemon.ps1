@@ -1,6 +1,9 @@
 # End-to-end check of the background instance: hotkey, IPC hand-off, recording.
+# Takes over the mouse and keyboard for a few seconds; the clipboard is not touched.
+# Usage: scripts/e2e-daemon.ps1 -Exe target/release/krab.exe
 param([string]$Exe)
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;

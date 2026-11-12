@@ -4,7 +4,7 @@
 use crate::capture::{self, Capture, Shot};
 use crate::config::Config;
 use crate::geom::RectI;
-use crate::hud::{self, Hud};
+use crate::hud::Hud;
 use crate::ipc::{Message, Request};
 use crate::output::{self, Image};
 use crate::overlay::{
@@ -90,6 +90,8 @@ fn monitor_key(m: &MonitorHandle) -> (i32, i32, u32, u32) {
     )
 }
 
+// Toasts are native notifications on Linux, so only one anchor is used there.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 #[derive(Clone, Copy)]
 enum Anchor {
     TopCenter,
@@ -722,7 +724,7 @@ impl App {
         #[cfg(not(target_os = "linux"))]
         {
             self.huds.retain(|h| !matches!(h.hud, Hud::Toast { .. }));
-            let thumb = img.map(|i| hud::thumbnail(i, 320, 220));
+            let thumb = img.map(|i| crate::hud::thumbnail(i, 320, 220));
             let hud = Hud::Toast {
                 title,
                 detail,
@@ -764,6 +766,7 @@ impl App {
                 origin.y + area.height as i32 - h as i32 - (68.0 * scale) as i32,
             ),
         };
+        #[cfg_attr(not(windows), allow(unused_mut))]
         let mut attrs = Window::default_attributes()
             .with_title("Krab")
             .with_decorations(false)

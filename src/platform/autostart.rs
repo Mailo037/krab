@@ -2,6 +2,7 @@
 
 use std::io;
 
+#[cfg(not(target_os = "macos"))]
 const APP: &str = "Krab";
 
 fn exe() -> io::Result<String> {
