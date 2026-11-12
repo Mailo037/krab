@@ -521,23 +521,32 @@ fn scene_huds(snip: &krab::output::Image) -> (Vec<u32>, u32, u32) {
         thumb: Some(hud::thumbnail(snip, 320, 220)),
         action: None,
     };
-    let (tw, _) = draw_hud(&mut c, &toast, 70.0, 62.0, s, false);
-    caption(&mut c, "Instant confirmation", 70.0 + tw / 2.0);
-
     let countdown = Hud::Countdown {
         deadline: Instant::now() + Duration::from_millis(2600),
     };
-    let cx = 70.0 + tw + 110.0;
-    let (cw, _) = draw_hud(&mut c, &countdown, cx, 88.0, s, false);
-    caption(&mut c, "Delayed snips", cx + cw / 2.0);
-
     let recording = Hud::Recording {
         started: Instant::now() - Duration::from_secs(83),
         saving: false,
     };
-    let rx = cx + cw + 110.0;
-    let (rw, _) = draw_hud(&mut c, &recording, rx, 94.0, s, false);
-    caption(&mut c, "Screen recording", rx + rw / 2.0);
+    // Lay the three surfaces out as one centred row.
+    let gap = 80.0;
+    let widths = [
+        toast.size().0 * s,
+        countdown.size().0 * s,
+        recording.size().0 * s,
+    ];
+    let mut x = (w as f32 - widths.iter().sum::<f32>() - 2.0 * gap) / 2.0;
+    let row_mid = 140.0;
+    for (hud, label) in [
+        (&toast, "Instant confirmation"),
+        (&countdown, "Delayed snips"),
+        (&recording, "Screen recording"),
+    ] {
+        let y = row_mid - hud.size().1 * s / 2.0;
+        let (hw, _) = draw_hud(&mut c, hud, x.round(), y.round(), s, false);
+        caption(&mut c, label, x + hw / 2.0);
+        x += hw + gap;
+    }
     (px, w, h)
 }
 

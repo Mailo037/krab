@@ -572,3 +572,30 @@ fn shot_clone(s: &Shot) -> Shot {
         name: s.name.clone(),
     }
 }
+
+#[test]
+fn a_temporary_size_mismatch_does_not_degrade_the_capture() {
+    let wins = [WinInfo {
+        rect: RectI::new(100, 80, 120, 90),
+        title: "w".into(),
+    }];
+    let shared = Shared {
+        mode: Mode::Window,
+        kind: Kind::Snip,
+        delay: 3,
+    };
+    let mut o = Overlay::new(shot(), &wins, Options::default(), shared);
+    // First frame arrives while the window is still small...
+    let mut small = vec![0u32; 500 * 400];
+    o.render(&mut small, 500, 400);
+    assert_eq!(o.size(), (500, 400));
+    // ...then it reaches its real size: pixels and window rects are exact again.
+    let mut full = vec![0u32; (W * H) as usize];
+    o.render(&mut full, W, H);
+    assert_eq!(o.size(), (W, H));
+    click(&mut o, (150.0, 100.0));
+    assert_eq!(o.selection(), Some(RectI::new(100, 80, 120, 90)));
+    let img = o.compose().unwrap();
+    assert_eq!(pixel(&img, 0, 0), [0, 100, 80, 255]);
+    assert_eq!(pixel(&img, 119, 89), [0, 219, 169, 255]);
+}

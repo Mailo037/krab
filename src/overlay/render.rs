@@ -34,32 +34,47 @@ fn mix(a: u32, b: u32, t: u32) -> u32 {
 
 impl Overlay {
     /// Adapt to a surface whose size differs from the captured image (rare:
-    /// fractional scaling on some compositors).
+    /// fractional scaling on some compositors, or a window that is still
+    /// settling into full screen). The capture itself is never degraded: the
+    /// original pixels are kept and every size is resampled from them, so the
+    /// overlay is pixel-exact again as soon as the sizes match.
     fn ensure_size(&mut self, w: u32, h: u32) {
         if (w, h) == (self.w, self.h) {
             return;
         }
-        let (ow, oh) = (self.w, self.h);
-        let mut px = Vec::with_capacity((w * h) as usize);
-        for y in 0..h {
-            let sy = (y as u64 * oh as u64 / h as u64) as u32;
-            let row = (sy * ow) as usize;
-            for x in 0..w {
-                let sx = (x as u64 * ow as u64 / w as u64) as usize;
-                px.push(self.px[row + sx]);
+        let (src, sw, sh) = match self.original.take() {
+            Some(original) => original,
+            None => (std::mem::take(&mut self.px), self.w, self.h),
+        };
+        if (w, h) == (sw, sh) {
+            self.px = src;
+        } else {
+            let mut px = Vec::with_capacity((w * h) as usize);
+            for y in 0..h {
+                let sy = (y as u64 * sh as u64 / h as u64) as u32;
+                let row = (sy * sw) as usize;
+                for x in 0..w {
+                    let sx = (x as u64 * sw as u64 / w as u64) as usize;
+                    px.push(src[row + sx]);
+                }
             }
+            self.px = px;
+            self.original = Some((src, sw, sh));
         }
-        let (kx, ky) = (w as f32 / ow as f32, h as f32 / oh as f32);
-        for r in &mut self.windows {
-            *r = RectF::new(
-                r.x as f32 * kx,
-                r.y as f32 * ky,
-                r.w as f32 * kx,
-                r.h as f32 * ky,
-            )
-            .round();
-        }
-        self.px = px;
+        let (kx, ky) = (w as f32 / sw as f32, h as f32 / sh as f32);
+        self.windows = self
+            .captured_windows
+            .iter()
+            .map(|r| {
+                RectF::new(
+                    r.x as f32 * kx,
+                    r.y as f32 * ky,
+                    r.w as f32 * kx,
+                    r.h as f32 * ky,
+                )
+                .round()
+            })
+            .collect();
         self.w = w;
         self.h = h;
         self.clear_selection();

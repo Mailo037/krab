@@ -210,13 +210,18 @@ struct TextEdit {
 }
 
 pub struct Overlay {
+    /// The screenshot at the size it is displayed at.
     px: Vec<u32>,
     w: u32,
     h: u32,
+    /// The capture as taken, kept only while `px` is a resampled copy.
+    original: Option<(Vec<u32>, u32, u32)>,
     scale: f32,
     opts: Options,
     /// Window rects in local pixels, top-most first.
     windows: Vec<RectI>,
+    /// The same rects at capture resolution.
+    captured_windows: Vec<RectI>,
     ui: Shared,
 
     sel: Option<Selection>,
@@ -260,7 +265,9 @@ impl Overlay {
             h: shot.h,
             scale: shot.scale.max(0.5),
             px: shot.px,
+            original: None,
             opts,
+            captured_windows: local.clone(),
             windows: local,
             ui: shared,
             sel: None,

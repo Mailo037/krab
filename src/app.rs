@@ -123,6 +123,8 @@ pub struct App {
     recorder: Option<Recorder>,
     /// Background jobs (text extraction) still running.
     busy: usize,
+    /// A finished snip waiting to be copied / saved.
+    pending: Option<(Finish, Image)>,
     last_monitor: Option<MonitorHandle>,
     /// Testing aid: when to cancel the open overlay automatically.
     session_deadline: Option<Instant>,
@@ -162,6 +164,7 @@ pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
         settle: None,
         recorder: None,
         busy: 0,
+        pending: None,
         last_monitor: None,
         session_deadline: None,
         started: false,
@@ -313,6 +316,7 @@ impl App {
             && self.settle.is_none()
             && self.recorder.is_none()
             && self.busy == 0
+            && self.pending.is_none()
     }
 
     /// Make sure a hidden overlay window exists for every connected monitor.
@@ -551,7 +555,10 @@ impl App {
             Outcome::Cancel => self.close_session(),
             Outcome::Finish(kind, img) => {
                 self.close_session();
-                self.deliver(el, kind, img);
+                // Delivered from `about_to_wait`: showing a native dialog (a
+                // nested message loop) from inside a window-event callback
+                // leaves the event loop unable to shut down afterwards.
+                self.pending = Some((kind, img));
             }
             Outcome::Delay(secs) => {
                 let shared = self.session.as_ref().map(|s| s.wins[idx].overlay.shared());
@@ -1233,6 +1240,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        if let Some((kind, img)) = self.pending.take() {
+            self.deliver(el, kind, img);
+        }
         self.tick(el);
         if !self.launch.daemon && self.idle() {
             el.exit();
