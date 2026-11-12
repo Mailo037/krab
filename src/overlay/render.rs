@@ -352,9 +352,7 @@ impl Overlay {
             ph / 2.0,
             if accent { theme::ACCENT } else { theme::PANEL },
         );
-        if !accent {
-            c.stroke_rrect(r.inflate(-0.5 * s), ph / 2.0, 1.0 * s, theme::PANEL_BORDER);
-        }
+
         let color = if accent {
             Color::WHITE
         } else {
@@ -488,8 +486,23 @@ impl Overlay {
         };
         let tip = self.btn_tip(btn);
         let em = 12.0 * s;
-        let tw = text::ui().measure(&tip, em);
-        let (pw, ph) = (tw + 16.0 * s, 24.0 * s);
+        let face = text::ui();
+        // "Label   Keys": the keys are drawn as keycaps after a dot.
+        let (label, keys): (&str, Vec<&str>) = match tip.split_once("   ") {
+            Some((l, k)) if !k.starts_with('(') => (l, k.split('+').collect()),
+            _ => (tip.as_str(), Vec::new()),
+        };
+        let key_em = 11.0 * s;
+        let cap_h = 18.0 * s;
+        let cap_w = |k: &str| (face.measure(k, key_em) + 10.0 * s).max(cap_h);
+        let dot_w = 14.0 * s;
+        let keys_w: f32 = if keys.is_empty() {
+            0.0
+        } else {
+            dot_w + keys.iter().map(|k| cap_w(k)).sum::<f32>() + 3.0 * s * (keys.len() - 1) as f32
+        };
+        let tw = face.measure(label, em) + keys_w;
+        let (pw, ph) = (tw + 18.0 * s, 28.0 * s);
         let gap = 7.0 * s;
 
         // Keep the tooltip off the neighbouring bar.
@@ -509,9 +522,28 @@ impl Overlay {
         let x = (slot.rect.center().x - pw / 2.0)
             .clamp(4.0 * s, (self.w as f32 - pw - 4.0 * s).max(4.0 * s));
         let r = RectF::new(x.round(), y.round(), pw, ph);
-        c.fill_rrect(r, 6.0 * s, Color::rgb(0x0F, 0x10, 0x13));
-        c.stroke_rrect(r.inflate(-0.5 * s), 6.0 * s, 1.0 * s, theme::PANEL_BORDER);
-        text::ui().draw_centered(c, &tip, r.x + r.w / 2.0, r.y + r.h / 2.0, em, theme::TEXT);
+        c.fill_rrect(r, 8.0 * s, Color::rgb(0x0F, 0x10, 0x13));
+        let cy = r.y + r.h / 2.0;
+        let mut x = r.x + 9.0 * s;
+        x += face.draw(
+            c,
+            label,
+            x,
+            face.baseline_for_center(cy, em),
+            em,
+            theme::TEXT,
+        );
+        if !keys.is_empty() {
+            c.fill_circle(Pt::new(x + dot_w / 2.0, cy), 1.6 * s, theme::TEXT_DIM);
+            x += dot_w;
+            for k in &keys {
+                let w = cap_w(k);
+                let cap = RectF::new(x, cy - cap_h / 2.0, w, cap_h);
+                c.fill_rrect(cap, 5.0 * s, Color::rgba(255, 255, 255, 30));
+                face.draw_centered(c, k, cap.x + w / 2.0, cy, key_em, theme::TEXT);
+                x += w + 3.0 * s;
+            }
+        }
     }
 
     /// Pixel magnifier with the colour and position under the pointer.
@@ -565,12 +597,6 @@ impl Overlay {
         let cr = RectF::new(gx + half as f32 * cell, gy + half as f32 * cell, cell, cell);
         c.stroke_rrect(cr.inflate(1.0), 0.0, 1.0, Color::BLACK);
         c.stroke_rrect(cr.inflate(0.0), 0.0, 1.0, Color::WHITE);
-        c.stroke_rrect(
-            RectF::new(gx, gy, side, side).inflate(0.5),
-            0.0,
-            1.0,
-            theme::PANEL_BORDER,
-        );
 
         // Two lines: colour, then position.
         let em = 11.5 * s;

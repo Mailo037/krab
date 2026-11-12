@@ -56,12 +56,7 @@ impl Hud {
         if hovered {
             c.fill_rect(RectF::new(0.0, 0.0, fw, fh), Color::rgba(255, 255, 255, 12));
         }
-        c.stroke_rrect(
-            RectF::new(0.5, 0.5, fw - 1.0, fh - 1.0),
-            0.0,
-            1.0,
-            theme::PANEL_BORDER,
-        );
+
         let face = text::ui();
 
         match self {
@@ -78,7 +73,7 @@ impl Hud {
                     Some(img) => c.blit_rgba_fit(&img.rgba, img.w, img.h, frame.inflate(-3.0 * s)),
                     None => crate::brand::draw_mark(&mut c, frame.inflate(-6.0 * s), false),
                 }
-                c.stroke_rrect(frame, 6.0 * s, 1.0, theme::PANEL_BORDER);
+
                 let tx = frame.right() + 13.0 * s;
                 let max_w = fw - tx - pad;
                 let title_fit = ellipsize(title, 13.5 * s, max_w);

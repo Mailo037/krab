@@ -330,11 +330,10 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Floating panel: shadow, fill and hairline border.
+    /// Floating panel: shadow and fill, no outline.
     pub fn panel(&mut self, r: RectF, radius: f32, s: f32) {
         self.shadow(r, radius, 14.0 * s, 0.55);
         self.fill_rrect(r, radius, theme::PANEL);
-        self.stroke_rrect(r.inflate(-0.5 * s), radius, 1.0 * s, theme::PANEL_BORDER);
     }
 
     /// Mosaic the area `r` (in canvas space) using pixels from `src`, which

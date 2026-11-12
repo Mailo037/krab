@@ -16,7 +16,7 @@ use winit::keyboard::KeyCode;
 pub const SIZE: (f32, f32) = (540.0, 640.0);
 
 const PAD: f32 = 22.0;
-const HEADER: f32 = 66.0;
+const HEADER: f32 = 42.0;
 const SECTION_GAP: f32 = 24.0;
 const CARD_RADIUS: f32 = 12.0;
 
@@ -39,6 +39,10 @@ pub enum Action {
     CheckForUpdates,
     SetAutostart(bool),
     DisableWindowsSnipping,
+    /// The title bar was grabbed: let the system move the window.
+    DragWindow,
+    Minimize,
+    Close,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,6 +74,8 @@ enum Hit {
     OpenConfig,
     CheckUpdates,
     DisableWinSnip,
+    Minimize,
+    Close,
 }
 
 const AFTER_CAPTURE: [(&str, &str); 2] = [("edit", "Annotate"), ("copy", "Copy at once")];
@@ -176,6 +182,8 @@ pub struct Settings {
     pointer: Option<Pt>,
     view: (f32, f32),
     hits: Vec<(RectF, Hit)>,
+    /// Window buttons in the title bar (not scrolled).
+    title_hits: Vec<(RectF, Hit)>,
     content_h: f32,
     dirty: bool,
 }
@@ -195,6 +203,7 @@ impl Settings {
             pointer: None,
             view: SIZE,
             hits: Vec::new(),
+            title_hits: Vec::new(),
             content_h: 0.0,
             dirty: true,
         }
@@ -280,11 +289,12 @@ impl Settings {
 
     fn hover(&self) -> Option<Hit> {
         let p = self.pointer?;
-        if p.y < HEADER {
-            return None;
-        }
-        self.hits
-            .iter()
+        let hits = if p.y < HEADER {
+            &self.title_hits
+        } else {
+            &self.hits
+        };
+        hits.iter()
             .rev()
             .find(|(r, _)| r.contains(p))
             .map(|(_, h)| *h)
@@ -312,6 +322,13 @@ impl Settings {
         if self.scroll != before {
             self.dirty = true;
         }
+    }
+
+    /// Left button pressed: a press on the title bar (outside its buttons)
+    /// starts moving the window.
+    pub fn press(&mut self) -> Option<Action> {
+        let p = self.pointer?;
+        (p.y < HEADER && self.hover().is_none()).then_some(Action::DragWindow)
     }
 
     /// Left click (on release).
@@ -379,6 +396,8 @@ impl Settings {
                 out.push(Action::CheckForUpdates);
             }
             Hit::DisableWinSnip => out.push(Action::DisableWindowsSnipping),
+            Hit::Minimize => out.push(Action::Minimize),
+            Hit::Close => out.push(Action::Close),
         }
         out
     }
@@ -472,7 +491,7 @@ impl Settings {
             let card_h: f32 = rows.iter().map(Row::height).sum();
             let card = RectF::new(x, y, cw, card_h);
             p.c.fill_rrect(p.r(card), CARD_RADIUS * scale, CARD);
-            p.c.stroke_rrect(p.r(card), CARD_RADIUS * scale, 1.0, theme::PANEL_BORDER);
+
             let mut ry = y;
             for (i, row) in rows.iter().enumerate() {
                 let rh = row.height();
@@ -499,11 +518,37 @@ impl Settings {
                 theme::SEPARATOR,
             );
         }
-        crate::brand::draw_mark(p.c, p.r(RectF::new(PAD, 17.0, 32.0, 32.0)), true);
-        p.text("Settings", PAD + 46.0, 40.0, 19.0, theme::TEXT);
-        let ver = format!("Krab {}", env!("CARGO_PKG_VERSION"));
-        let vw_text = text::ui().measure(&ver, 12.0 * scale) / scale;
-        p.text(&ver, vw - PAD - vw_text, 39.0, 12.0, theme::TEXT_DIM);
+        // Custom title bar: the whole strip drags the window; minimise and
+        // close sit on the right.
+        crate::brand::draw_mark(p.c, p.r(RectF::new(14.0, 10.0, 22.0, 22.0)), true);
+        p.text("Krab Settings", 44.0, 26.0, 13.0, theme::TEXT);
+        let close = RectF::new(vw - 8.0 - 32.0, 7.0, 32.0, 28.0);
+        let min = RectF::new(close.x - 2.0 - 32.0, 7.0, 32.0, 28.0);
+        for (r, hit) in [(min, Hit::Minimize), (close, Hit::Close)] {
+            if p.hover == Some(hit) {
+                let col = if hit == Hit::Close {
+                    theme::DANGER
+                } else {
+                    CONTROL_HOVER
+                };
+                p.c.fill_rrect(p.r(r), 7.0 * scale, col);
+            }
+        }
+        let c = min.center();
+        p.c.line(
+            p.pt(Pt::new(c.x - 5.0, c.y)),
+            p.pt(Pt::new(c.x + 5.0, c.y)),
+            1.4 * scale,
+            theme::TEXT,
+        );
+        icons::draw(
+            p.c,
+            Icon::Close,
+            p.pt(close.center()),
+            14.0 * scale,
+            theme::TEXT,
+        );
+        self.title_hits = vec![(min, Hit::Minimize), (close, Hit::Close)];
 
         // Scroll indicator.
         let max = self.max_scroll();
@@ -531,10 +576,7 @@ impl Settings {
                 let (msg, col) = if recording {
                     match self.reject {
                         Some(why) => (why.to_string(), theme::DANGER),
-                        None => (
-                            "Press the keys - Esc cancels, Backspace clears".into(),
-                            theme::TEXT_DIM,
-                        ),
+                        None => ("Esc cancels, Backspace clears".into(), theme::TEXT_DIM),
                     }
                 } else {
                     let st = &self.status[i];
@@ -547,28 +589,22 @@ impl Settings {
                     };
                     (st.message().to_string(), col)
                 };
-                p.text(&msg, lx, cy + 15.0, 11.5, col);
 
                 let spec = slot.get(&self.cfg);
                 let chip_w = 178.0;
                 let clear = RectF::new(right - 28.0, cy - 14.0, 28.0, 28.0);
                 let chip = RectF::new(clear.x - 6.0 - chip_w, cy - 16.0, chip_w, 32.0);
+                let fit = ellipsize(&msg, 11.5 * p.s, (chip.x - lx - 12.0) * p.s);
+                p.text(&fit, lx, cy + 15.0, 11.5, col);
                 let hit = Hit::Shortcut(*slot);
-                p.control(chip, 8.0, hit);
+                // Tinted fills instead of outlines: orange while listening,
+                // red when the shortcut does not work.
                 if recording {
-                    p.c.stroke_rrect(
-                        p.r(chip.inflate(-0.75)),
-                        8.0 * p.s,
-                        1.5 * p.s,
-                        theme::ACCENT,
-                    );
+                    p.c.fill_rrect(p.r(chip), 8.0 * p.s, theme::ACCENT.alpha(0.22));
                 } else if self.status[i].is_problem() {
-                    p.c.stroke_rrect(
-                        p.r(chip.inflate(-0.5)),
-                        8.0 * p.s,
-                        1.0 * p.s,
-                        theme::DANGER.alpha(0.7),
-                    );
+                    p.c.fill_rrect(p.r(chip), 8.0 * p.s, theme::DANGER.alpha(0.16));
+                } else {
+                    p.control(chip, 8.0, hit);
                 }
                 let (label, col) = if recording {
                     if self.pending.is_empty() {

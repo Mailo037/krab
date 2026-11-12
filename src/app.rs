@@ -1269,15 +1269,19 @@ impl App {
         let mut attrs = Window::default_attributes()
             .with_title("Krab Settings")
             .with_inner_size(winit::dpi::LogicalSize::new(w, h))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(w, 360.0))
-            .with_resizable(true)
+            // Krab draws its own title bar.
+            .with_decorations(false)
+            .with_resizable(false)
             .with_window_icon(
                 winit::window::Icon::from_rgba(crate::brand::mark_rgba(64, true), 64, 64).ok(),
             );
         #[cfg(windows)]
         {
+            use winit::platform::windows::CornerPreference;
             use winit::platform::windows::WindowAttributesExtWindows;
             attrs = attrs
+                .with_undecorated_shadow(true)
+                .with_corner_preference(CornerPreference::Round)
                 .with_taskbar_icon(
                     winit::window::Icon::from_rgba(crate::brand::mark_rgba(64, true), 64, 64).ok(),
                 )
@@ -1348,6 +1352,16 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => sw.ui.pointer_left(),
             WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if sw.ui.press().is_some() {
+                    let _ = sw.window.drag_window();
+                }
+                return;
+            }
+            WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
                 ..
@@ -1399,6 +1413,20 @@ impl App {
     fn settings_action(&mut self, action: settings::Action) {
         use settings::Action;
         match action {
+            Action::Close => {
+                self.close_settings();
+                return;
+            }
+            Action::Minimize => {
+                if let Some(sw) = &self.settings {
+                    sw.window.set_minimized(true);
+                }
+            }
+            Action::DragWindow => {
+                if let Some(sw) = &self.settings {
+                    let _ = sw.window.drag_window();
+                }
+            }
             Action::Save => {
                 if let Some(sw) = &self.settings {
                     self.cfg = sw.ui.cfg.clone();

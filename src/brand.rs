@@ -1,7 +1,7 @@
 //! The Krab mark, drawn as vectors so it scales from a 16px tray icon to a
 //! banner without shipping any bitmap assets.
 
-use crate::geom::{Pt, RectF};
+use crate::geom::RectF;
 use crate::gfx::icons::push_rounded;
 use crate::gfx::{premul_argb_to_rgba, theme, Canvas, Color};
 use tiny_skia::{
@@ -11,6 +11,7 @@ use tiny_skia::{
 const SHELL: Color = theme::ACCENT;
 const SHELL_DARK: Color = theme::ACCENT_DEEP;
 const INK: Color = Color::rgb(0x1B, 0x1C, 0x20);
+const TILE: Color = Color::rgb(0x22, 0x23, 0x29);
 
 /// A claw: a disc with a wedge cut out, opening towards `open_deg`
 /// (degrees, clockwise from +x in screen space).
@@ -71,13 +72,8 @@ pub fn draw_mark(c: &mut Canvas, r: RectF, badge: bool) {
     if badge {
         let tile = RectF::new(x0, y0, size, size);
         if let Some(p) = squircle(tile) {
-            c.fill_path_gradient(
-                &p,
-                Pt::new(x0, y0),
-                Color::rgb(0x2E, 0x30, 0x3A),
-                Pt::new(x0 + size, y0 + size),
-                Color::rgb(0x14, 0x15, 0x19),
-            );
+            // One flat colour, no gradient.
+            c.fill_path(&p, TILE);
         }
     }
 
