@@ -317,10 +317,6 @@ fn draw_hud(win: &mut HudWin) {
     };
     win.hud
         .render(&mut buf, size.width, size.height, win.scale, win.hovered);
-    // Created hidden; show with the first frame so no white flashes first.
-    if win.window.is_visible() == Some(false) {
-        win.window.set_visible(true);
-    }
     let _ = buf.present();
 }
 
@@ -501,8 +497,9 @@ impl App {
         for (i, win) in wins.iter_mut().enumerate() {
             win.overlay.set_mods(self.mods);
             if cfg!(windows) {
-                // Render first, then show and blit: the overlay appears with
-                // its first frame already in place.
+                // Render first, then show and blit while cloaked: the overlay
+                // appears with its first frame already in place.
+                crate::platform::cloak(&win.window, true);
                 let size = win.window.inner_size();
                 if let (Some(w), Some(h)) =
                     (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
@@ -518,6 +515,7 @@ impl App {
                 }
             }
             win.window.set_visible(true);
+            crate::platform::cloak(&win.window, false);
             #[cfg(target_os = "macos")]
             {
                 use winit::platform::macos::WindowExtMacOS;
@@ -839,9 +837,12 @@ impl App {
             expires: ttl.map(|d| Instant::now() + d),
             hovered: false,
         };
-        draw_hud(&mut win);
-        // Fallback if the first frame could not be drawn.
+        // Created hidden: show it cloaked and uncloak it with its first frame
+        // in place, so no white bar or empty window flashes up first.
+        crate::platform::cloak(&win.window, true);
         win.window.set_visible(true);
+        draw_hud(&mut win);
+        crate::platform::cloak(&win.window, false);
         win.window.request_redraw();
         self.huds.push(win);
     }
@@ -1331,9 +1332,12 @@ impl App {
             surface,
             ui,
         };
-        draw_settings(&mut sw);
-        // Fallback if the first frame could not be drawn.
+        // Created hidden: show it cloaked and uncloak it with its first frame
+        // in place, so no white title bar flashes up first.
+        crate::platform::cloak(&sw.window, true);
         sw.window.set_visible(true);
+        draw_settings(&mut sw);
+        crate::platform::cloak(&sw.window, false);
         sw.window.focus_window();
         sw.window.request_redraw();
         self.settings = Some(sw);
@@ -1557,12 +1561,6 @@ fn draw_settings(sw: &mut SettingsWin) {
     };
     let scale = sw.window.scale_factor() as f32;
     sw.ui.render(&mut buf, size.width, size.height, scale);
-    // The window is created hidden so Windows never paints its default white
-    // background (seen as a white bar at the top); show it once the first
-    // frame is ready.
-    if sw.window.is_visible() == Some(false) {
-        sw.window.set_visible(true);
-    }
     let _ = buf.present();
 }
 impl ApplicationHandler<UserEvent> for App {

@@ -9,7 +9,8 @@ use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED,
+    DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
@@ -48,6 +49,30 @@ pub fn attach_console() {
 pub fn allow_foreground_handoff() {
     unsafe {
         AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+/// Keep `window` off the screen while Windows treats it as shown (DWM
+/// cloaking). winit's borderless windows keep the caption style and only
+/// drop the frame once they are shown, so for a moment Windows draws a white
+/// title bar and an unpainted client area; showing a window cloaked, painting
+/// it and then uncloaking it skips all of that.
+pub fn cloak(window: &winit::window::Window, on: bool) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    let value: BOOL = on.into();
+    unsafe {
+        DwmSetWindowAttribute(
+            h.hwnd.get() as HWND,
+            DWMWA_CLOAK as u32,
+            &value as *const BOOL as *const c_void,
+            size_of::<BOOL>() as u32,
+        );
     }
 }
 
