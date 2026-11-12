@@ -6,9 +6,9 @@ fn main() {
 
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        const MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+        const MANIFEST_TEMPLATE: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="dev.krab.Krab" version="0.1.0.0"/>
+  <assemblyIdentity type="win32" name="dev.krab.Krab" version="{VERSION}.0"/>
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
@@ -27,11 +27,15 @@ fn main() {
     </application>
   </compatibility>
 </assembly>"#;
+        let manifest = MANIFEST_TEMPLATE.replace(
+            "{VERSION}",
+            &std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into()),
+        );
         let mut res = winresource::WindowsResource::new();
         if std::path::Path::new("assets/icon.ico").exists() {
             res.set_icon("assets/icon.ico");
         }
-        res.set_manifest(MANIFEST);
+        res.set_manifest(&manifest);
         res.set("ProductName", "Krab");
         res.set("FileDescription", "Krab snipping tool");
         if let Err(e) = res.compile() {

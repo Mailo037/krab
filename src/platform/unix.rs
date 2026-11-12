@@ -79,7 +79,7 @@ pub fn list_windows() -> Vec<WinInfo> {
             ))
         })
         .collect();
-    list.sort_by(|a, b| b.0.cmp(&a.0));
+    list.sort_by_key(|w| std::cmp::Reverse(w.0));
     list.into_iter().map(|(_, w)| w).collect()
 }
 

@@ -39,6 +39,8 @@ pub struct Config {
     pub record_fps: u32,
     /// Default annotation colour.
     pub color: String,
+    /// Install new versions automatically (checked once a day).
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -61,6 +63,7 @@ impl Default for Config {
             delay_seconds: 3,
             record_fps: 30,
             color: theme::PALETTE[0].to_hex_string(),
+            auto_update: true,
         }
     }
 }
@@ -139,7 +142,8 @@ impl Config {
              # hotkey examples: \"PrintScreen\", \"Alt+Shift+S\", \"Ctrl+Shift+KeyX\", \"\" to disable\n\
              # after_capture:   \"edit\" (annotate in place) or \"copy\" (copy immediately)\n\
              # default_mode:    rect | freeform | window | full\n\
-             # file_format:     png | jpg | bmp | gif\n\n{body}"
+             # file_format:     png | jpg | bmp | gif\n\
+             # auto_update:     true installs new versions automatically, false only via `krab --update`\n\n{body}"
         )
     }
 

@@ -14,6 +14,8 @@ pub enum Command {
     Quit,
     OpenConfig,
     Autostart(bool),
+    /// Check for a new version and install it.
+    Update,
     Help,
     Version,
     /// Internal: keep clipboard contents alive on Linux.
@@ -38,6 +40,10 @@ pub struct Args {
     pub trace: bool,
     /// Testing aid: close the overlay automatically after this many ms.
     pub exit_after_ms: Option<u64>,
+    /// `--update` started automatically: no output, no restart prompts.
+    pub background: bool,
+    /// This daemon replaces one that just installed an update.
+    pub updated: bool,
 }
 
 pub const HELP: &str = "\
@@ -67,6 +73,7 @@ BACKGROUND INSTANCE:
         --quit                 stop it
         --autostart <on|off>   start Krab when you log in
         --config               open the configuration file
+        --update               install the newest version now
 
     -h, --help                 show this help
     -V, --version              show the version
@@ -83,6 +90,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
         quiet: false,
         trace: false,
         exit_after_ms: None,
+        background: false,
+        updated: false,
     };
     let mut it = args.into_iter();
     let value = |it: &mut dyn Iterator<Item = String>, flag: &str| -> Result<String, String> {
@@ -95,6 +104,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             "--daemon" | "daemon" | "--tray" | "tray" => command = Some(Command::Daemon),
             "--quit" | "quit" => command = Some(Command::Quit),
             "--config" | "config" => command = Some(Command::OpenConfig),
+            "--update" | "update" => command = Some(Command::Update),
+            "--background" => out.background = true,
+            "--updated" => out.updated = true,
             "--autostart" => {
                 let v = value(&mut it, "--autostart")?;
                 command = Some(Command::Autostart(match v.to_ascii_lowercase().as_str() {
@@ -203,6 +215,9 @@ mod tests {
             Command::Autostart(false)
         );
         assert_eq!(p("-V").unwrap().command, Command::Version);
+        assert_eq!(p("--update").unwrap().command, Command::Update);
+        let a = p("--daemon --updated").unwrap();
+        assert!(a.updated && a.command == Command::Daemon);
     }
 
     #[test]
