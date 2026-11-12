@@ -1,0 +1,297 @@
+//! Toolbar geometry: where every button lives for the current state.
+
+use super::{Btn, Drag, Kind, Mode, Overlay};
+use crate::annotate::Tool;
+use crate::geom::{Pt, RectF};
+use crate::gfx::icons::Icon;
+use crate::gfx::{text, theme};
+
+pub(super) struct Slot {
+    pub btn: Btn,
+    pub rect: RectF,
+}
+
+pub(super) struct Bar {
+    pub rect: RectF,
+    pub slots: Vec<Slot>,
+    /// X positions of separator lines.
+    pub seps: Vec<f32>,
+}
+
+#[derive(Default)]
+pub(super) struct Bars {
+    pub main: Option<Bar>,
+    pub props: Option<Bar>,
+    /// The main bar sits above the selection (affects label placement).
+    pub above: bool,
+}
+
+impl Bars {
+    pub fn iter(&self) -> impl Iterator<Item = &Bar> {
+        self.main.iter().chain(self.props.iter())
+    }
+
+    pub fn hit(&self, p: Pt) -> Option<Btn> {
+        self.iter()
+            .flat_map(|b| b.slots.iter())
+            .find(|s| s.rect.contains(p))
+            .map(|s| s.btn)
+    }
+
+    pub fn contains(&self, p: Pt) -> bool {
+        self.iter().any(|b| b.rect.contains(p))
+    }
+}
+
+const MODE_BAR: &[Option<Btn>] = &[
+    Some(Btn::Kind(Kind::Snip)),
+    Some(Btn::Kind(Kind::Record)),
+    None,
+    Some(Btn::Mode(Mode::Rect)),
+    Some(Btn::Mode(Mode::Freeform)),
+    Some(Btn::Mode(Mode::Window)),
+    Some(Btn::Mode(Mode::Fullscreen)),
+    None,
+    Some(Btn::Delay),
+    None,
+    Some(Btn::Cancel),
+];
+
+const TOOL_BAR: &[Option<Btn>] = &[
+    Some(Btn::Tool(Tool::Select)),
+    Some(Btn::Tool(Tool::Pen)),
+    Some(Btn::Tool(Tool::Highlighter)),
+    Some(Btn::Tool(Tool::Line)),
+    Some(Btn::Tool(Tool::Arrow)),
+    Some(Btn::Tool(Tool::Rect)),
+    Some(Btn::Tool(Tool::Ellipse)),
+    Some(Btn::Tool(Tool::Text)),
+    Some(Btn::Tool(Tool::Pixelate)),
+    Some(Btn::Tool(Tool::Eraser)),
+    Some(Btn::Tool(Tool::Pipette)),
+    None,
+    Some(Btn::Undo),
+    Some(Btn::Redo),
+    None,
+    Some(Btn::Ocr),
+    Some(Btn::Open),
+    Some(Btn::Save),
+    None,
+    Some(Btn::Copy),
+    Some(Btn::Cancel),
+];
+
+const PROPS_BAR: &[Option<Btn>] = &[
+    Some(Btn::Color(0)),
+    Some(Btn::Color(1)),
+    Some(Btn::Color(2)),
+    Some(Btn::Color(3)),
+    Some(Btn::Color(4)),
+    Some(Btn::Color(5)),
+    Some(Btn::Color(6)),
+    Some(Btn::Color(7)),
+    None,
+    Some(Btn::Width(0)),
+    Some(Btn::Width(1)),
+    Some(Btn::Width(2)),
+];
+
+const RECORD_BAR: &[Option<Btn>] = &[Some(Btn::Record), None, Some(Btn::Cancel)];
+
+const SEP_W: f32 = 9.0;
+
+impl Overlay {
+    pub(super) fn btn_icon(&self, btn: Btn) -> Option<Icon> {
+        Some(match btn {
+            Btn::Kind(Kind::Snip) => Icon::Camera,
+            Btn::Kind(Kind::Record) => Icon::Video,
+            Btn::Mode(Mode::Rect) => Icon::ModeRect,
+            Btn::Mode(Mode::Freeform) => Icon::ModeFreeform,
+            Btn::Mode(Mode::Window) => Icon::ModeWindow,
+            Btn::Mode(Mode::Fullscreen) => Icon::ModeFull,
+            Btn::Delay => Icon::Timer,
+            Btn::Cancel => Icon::Close,
+            Btn::Tool(t) => match t {
+                Tool::Select => Icon::Pointer,
+                Tool::Pen => Icon::Pen,
+                Tool::Highlighter => Icon::Highlighter,
+                Tool::Line => Icon::Line,
+                Tool::Arrow => Icon::Arrow,
+                Tool::Rect => Icon::Rect,
+                Tool::Ellipse => Icon::Ellipse,
+                Tool::Text => Icon::Text,
+                Tool::Pixelate => Icon::Pixelate,
+                Tool::Eraser => Icon::Eraser,
+                Tool::Pipette => Icon::Pipette,
+            },
+            Btn::Undo => Icon::Undo,
+            Btn::Redo => Icon::Redo,
+            Btn::Ocr => Icon::TextScan,
+            Btn::Open => Icon::External,
+            Btn::Save => Icon::Save,
+            Btn::Copy => Icon::Copy,
+            Btn::Record => Icon::Dot,
+            Btn::Color(_) | Btn::Width(_) => return None,
+        })
+    }
+
+    pub(super) fn btn_label(&self, btn: Btn) -> Option<String> {
+        match btn {
+            Btn::Delay => Some(format!("{}s", self.ui.delay)),
+            Btn::Record => Some("Start recording".into()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn btn_tip(&self, btn: Btn) -> String {
+        match btn {
+            Btn::Kind(Kind::Snip) => "Screenshot".into(),
+            Btn::Kind(Kind::Record) => "Screen recording".into(),
+            Btn::Mode(Mode::Rect) => "Rectangle   R".into(),
+            Btn::Mode(Mode::Freeform) => "Freeform   F".into(),
+            Btn::Mode(Mode::Window) => "Window   W".into(),
+            Btn::Mode(Mode::Fullscreen) => "Full screen   M".into(),
+            Btn::Delay => format!("Snip in {} s   (scroll to change)", self.ui.delay),
+            Btn::Cancel => "Close   Esc".into(),
+            Btn::Tool(t) => match t {
+                Tool::Select => "Move / resize   V",
+                Tool::Pen => "Pen   P",
+                Tool::Highlighter => "Highlighter   H",
+                Tool::Line => "Line   L",
+                Tool::Arrow => "Arrow   A",
+                Tool::Rect => "Rectangle   R",
+                Tool::Ellipse => "Ellipse   E",
+                Tool::Text => "Text   T",
+                Tool::Pixelate => "Pixelate   B",
+                Tool::Eraser => "Eraser   X",
+                Tool::Pipette => "Color picker   I",
+            }
+            .into(),
+            Btn::Undo => "Undo   Ctrl+Z".into(),
+            Btn::Redo => "Redo   Ctrl+Y".into(),
+            Btn::Ocr => "Copy text / QR code".into(),
+            Btn::Open => "Open in default app".into(),
+            Btn::Save => "Save as...   Ctrl+S".into(),
+            Btn::Copy => "Copy   Enter".into(),
+            Btn::Record => "Start recording   Enter".into(),
+            Btn::Color(i) => theme::PALETTE[i as usize].to_hex_string(),
+            Btn::Width(i) => ["Small", "Medium", "Large"][i as usize].into(),
+        }
+    }
+
+    fn slot_width(&self, btn: Btn) -> f32 {
+        let s = self.scale;
+        match btn {
+            Btn::Color(_) => 26.0 * s,
+            Btn::Width(_) => 30.0 * s,
+            Btn::Delay | Btn::Record => {
+                let label = self.btn_label(btn).unwrap_or_default();
+                let pad = if btn == Btn::Record { 14.0 } else { 6.0 };
+                theme::BTN * s + text::ui().measure(&label, theme::FONT * s) + pad * s
+            }
+            _ => theme::BTN * s,
+        }
+    }
+
+    fn bar_size(&self, items: &[Option<Btn>], btn_h: f32) -> (f32, f32) {
+        let s = self.scale;
+        let mut w = theme::BAR_PAD * s * 2.0 - theme::BTN_GAP * s;
+        for item in items {
+            w += match item {
+                Some(b) => self.slot_width(*b) + theme::BTN_GAP * s,
+                None => SEP_W * s,
+            };
+        }
+        (w, btn_h + theme::BAR_PAD * s * 2.0)
+    }
+
+    fn build_bar(&self, items: &[Option<Btn>], x: f32, y: f32, btn_h: f32) -> Bar {
+        let s = self.scale;
+        let (w, h) = self.bar_size(items, btn_h);
+        let (x, y) = (x.round(), y.round());
+        let mut cx = x + theme::BAR_PAD * s;
+        let mut slots = Vec::with_capacity(items.len());
+        let mut seps = Vec::new();
+        for item in items {
+            match item {
+                Some(b) => {
+                    let bw = self.slot_width(*b);
+                    slots.push(Slot {
+                        btn: *b,
+                        rect: RectF::new(cx, y + theme::BAR_PAD * s, bw, btn_h),
+                    });
+                    cx += bw + theme::BTN_GAP * s;
+                }
+                None => {
+                    seps.push(cx + (SEP_W * s - theme::BTN_GAP * s) / 2.0);
+                    cx += SEP_W * s;
+                }
+            }
+        }
+        Bar {
+            rect: RectF::new(x, y, w, h),
+            slots,
+            seps,
+        }
+    }
+
+    /// Compute the bars for the current state.
+    pub(super) fn bars(&self) -> Bars {
+        let s = self.scale;
+        let (sw, sh) = (self.w as f32, self.h as f32);
+        let btn_h = theme::BTN * s;
+
+        let Some(sel) = &self.sel else {
+            if matches!(self.drag, Drag::NewRect { .. } | Drag::Lasso { .. }) {
+                return Bars::default();
+            }
+            let (w, _) = self.bar_size(MODE_BAR, btn_h);
+            let bar = self.build_bar(MODE_BAR, (sw - w) / 2.0, 18.0 * s, btn_h);
+            return Bars {
+                main: Some(bar),
+                props: None,
+                above: false,
+            };
+        };
+
+        let record = self.ui.kind == Kind::Record;
+        let items = if record { RECORD_BAR } else { TOOL_BAR };
+        let (mw, mh) = self.bar_size(items, btn_h);
+        let props_h = 26.0 * s;
+        let (pw, ph) = self.bar_size(PROPS_BAR, props_h);
+        let gap = 8.0 * s;
+        let margin = 8.0 * s;
+        // Always reserve room for the properties bar so the toolbar does not
+        // jump when switching between tools.
+        let reserve = if record { 0.0 } else { ph + gap * 0.75 };
+
+        let r = sel.rect;
+        let below_y = r.bottom() + gap;
+        let above_y = r.y - gap - mh;
+        let (my, above, props_below) = if below_y + mh + reserve <= sh - margin {
+            (below_y, false, true)
+        } else if above_y - reserve >= margin {
+            (above_y, true, false)
+        } else {
+            // No room outside: tuck the bars inside the bottom edge.
+            ((r.bottom() - gap - mh).min(sh - margin - mh), false, false)
+        };
+        let mx = (r.right() - mw).clamp(margin, (sw - mw - margin).max(margin));
+        let main = self.build_bar(items, mx, my, btn_h);
+
+        let props = (!record && self.tool.has_style()).then(|| {
+            let py = if props_below {
+                my + mh + gap * 0.75
+            } else {
+                my - gap * 0.75 - ph
+            };
+            let px = (mx + mw - pw).clamp(margin, (sw - pw - margin).max(margin));
+            self.build_bar(PROPS_BAR, px, py, props_h)
+        });
+        Bars {
+            main: Some(main),
+            props,
+            above,
+        }
+    }
+}
