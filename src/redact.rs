@@ -36,23 +36,65 @@ pub fn boxes_in_line(words: &[Word]) -> Vec<RectF> {
                 r = Some(r.map_or(w.rect, |r| r.union(&w.rect)));
             }
         }
-        if let Some(r) = r {
-            // A little margin hides anti-aliased edges too.
-            let pad = (r.h * 0.12).max(2.0);
-            out.push(r.inflate(pad));
+        let Some(mut r) = r else {
+            continue;
+        };
+        // After a label like "Token:" recognition often drops parts of the
+        // secret entirely: cover everything from the label on.
+        let label = words.iter().zip(&spans).rev().find(|(_, (_, e))| *e <= a);
+        if let Some((w, _)) = label.filter(|(w, _)| is_secret_label(&w.text)) {
+            let x = w.rect.right() + 2.0;
+            if x < r.x {
+                let (y0, y1) = (r.y.min(w.rect.y), r.bottom().max(w.rect.bottom()));
+                r = RectF::new(x, y0, r.right() - x, y1 - y0);
+            }
         }
+        // A little margin hides anti-aliased edges too.
+        let pad = (r.h * 0.12).max(2.0);
+        out.push(r.inflate(pad));
     }
     out
+}
+
+fn is_secret_label(word: &str) -> bool {
+    let w = word.to_lowercase();
+    let bare = w.trim_end_matches([':', '=']);
+    SECRET_LABELS.contains(&bare)
 }
 
 fn is_sep(c: char) -> bool {
     matches!(c, ' ' | '-' | '.' | '/' | '(' | ')')
 }
 
+/// Words that announce a secret: whatever follows them on the line is
+/// hidden, however garbled text recognition left it.
+const SECRET_LABELS: &[&str] = &[
+    "token", "key", "apikey", "api-key", "api_key", "secret", "password", "passwort", "kennwort",
+    "pass", "pwd", "pin", "tan", "bearer",
+];
+
 /// Character ranges (end exclusive) of sensitive items in a line.
 pub fn sensitive_ranges(c: &[char]) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::new();
     let tokens = tokens(c);
+    for (i, &(a, b)) in tokens.iter().enumerate() {
+        let word: String = c[a..b].iter().collect::<String>().to_lowercase();
+        let bare = word.trim_end_matches([':', '=']);
+        let marked = bare.len() < word.len()
+            || bare == "bearer"
+            || tokens
+                .get(i + 1)
+                .is_some_and(|&(na, _)| c[na] == ':' || c[na] == '=');
+        if marked && SECRET_LABELS.contains(&bare) {
+            // From the next real word to the end of the line.
+            let rest = tokens[i + 1..]
+                .iter()
+                .find(|&&(na, nb)| !c[na..nb].iter().all(|ch| *ch == ':' || *ch == '='));
+            if let Some(&(na, _)) = rest {
+                out.push((na, tokens.last().map_or(na, |t| t.1)));
+            }
+        }
+    }
     for &(a, b) in &tokens {
         let t: String = c[a..b].iter().collect();
         let t = t.trim_matches(|ch: char| ",;:!?\"'<>[]{}".contains(ch));
@@ -256,6 +298,28 @@ mod tests {
             found("token sk_live_51Hc8abcdEFGH1234ijkl ok"),
             ["sk_live_51Hc8abcdEFGH1234ijkl"]
         );
+    }
+
+    #[test]
+    fn a_label_box_reaches_back_to_the_label() {
+        // Recognition found no word for most of the secret.
+        let mut line = _line(&[("Token:", 60.0), ("1", 10.0), ("234ijkl", 80.0)]);
+        line[1].rect.x = 300.0;
+        line[2].rect.x = 320.0;
+        let boxes = boxes_in_line(&line);
+        assert_eq!(boxes.len(), 1);
+        assert!(boxes[0].x < 70.0 && boxes[0].x > 55.0, "{:?}", boxes[0]);
+        assert!(boxes[0].right() >= 400.0);
+    }
+
+    #[test]
+    fn labels_hide_garbled_secrets() {
+        // What Windows OCR made of "Token: sk_live_51Hc8abcdEFGH1234ijkl".
+        assert_eq!(found("Token: 1 234ijkl"), ["1 234ijkl"]);
+        assert_eq!(found("Passwort: hunter2"), ["hunter2"]);
+        assert_eq!(found("API key = abc def"), ["abc def"]);
+        assert_eq!(found("Authorization: Bearer eyJhbGciOi"), ["eyJhbGciOi"]);
+        assert!(found("Token economy and the key idea").is_empty());
     }
 
     #[test]

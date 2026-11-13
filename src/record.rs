@@ -564,24 +564,58 @@ pub fn encode_gif(
     Ok(path.to_path_buf())
 }
 
+/// How long a click stays visible in a recording.
+const CLICK_SHOWN: Duration = Duration::from_millis(450);
+
 /// Draws a halo around the pointer and a burst for every click, so viewers
 /// can follow the mouse in tutorials.
+///
+/// A quick click is over long before the next frame is grabbed, so the
+/// buttons are watched by a thread of their own every few milliseconds and
+/// every press is remembered until it has been shown.
 struct PointerMarks {
     on: bool,
     /// Top-left of the recorded area in desktop coordinates.
     origin: (i32, i32),
-    was_down: bool,
-    released: Option<(Instant, (f32, f32))>,
+    /// Recent presses: when, and where on the desktop.
+    presses: Arc<Mutex<Vec<(Instant, (i32, i32))>>>,
+    held: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
 }
 
 impl PointerMarks {
     fn new(on: bool, origin: (i32, i32)) -> Self {
-        Self {
+        let marks = Self {
             on,
             origin,
-            was_down: false,
-            released: None,
+            presses: Arc::default(),
+            held: Arc::default(),
+            stop: Arc::default(),
+        };
+        if on && platform::cursor_pos().is_some() {
+            let (presses, held, stop) = (
+                marks.presses.clone(),
+                marks.held.clone(),
+                marks.stop.clone(),
+            );
+            std::thread::spawn(move || {
+                let mut was = false;
+                while !stop.load(Ordering::Relaxed) {
+                    let down = platform::mouse_down();
+                    if down && !was {
+                        if let Some(p) = platform::cursor_pos() {
+                            let mut list = presses.lock().unwrap();
+                            list.retain(|(t, _)| t.elapsed() < CLICK_SHOWN);
+                            list.push((Instant::now(), p));
+                        }
+                    }
+                    held.store(down, Ordering::Relaxed);
+                    was = down;
+                    std::thread::sleep(Duration::from_millis(4));
+                }
+            });
         }
+        marks
     }
 
     fn draw(&mut self, frame: &mut [u32], w: u32, h: u32) {
@@ -591,33 +625,32 @@ impl PointerMarks {
         let Some((x, y)) = platform::cursor_pos() else {
             return;
         };
-        let p = ((x - self.origin.0) as f32, (y - self.origin.1) as f32);
-        let down = platform::mouse_down();
-        if self.was_down && !down {
-            self.released = Some((Instant::now(), p));
-        }
-        self.was_down = down;
+        let local =
+            |(x, y): (i32, i32)| Pt::new((x - self.origin.0) as f32, (y - self.origin.1) as f32);
         let mut c = Canvas::new(frame, w, h);
-        let at = Pt::new(p.0, p.1);
+        let at = local((x, y));
         c.fill_circle(at, 20.0, Color::rgba(255, 214, 10, 70));
-        if down {
+        if self.held.load(Ordering::Relaxed) {
             c.fill_circle(at, 14.0, theme::ACCENT.alpha(0.55));
             c.stroke_circle(at, 20.0, 2.5, theme::ACCENT);
         }
-        // A ring that widens and fades after each click.
-        if let Some((t, rp)) = self.released {
-            let k = t.elapsed().as_secs_f32() / 0.4;
-            if k >= 1.0 {
-                self.released = None;
-            } else {
-                c.stroke_circle(
-                    Pt::new(rp.0, rp.1),
-                    20.0 + 18.0 * k,
-                    3.0,
-                    theme::ACCENT.alpha(1.0 - k),
-                );
+        // Every recent press: a dot, then a ring that widens and fades.
+        for (t, p) in self.presses.lock().unwrap().iter() {
+            let k = t.elapsed().as_secs_f32() / CLICK_SHOWN.as_secs_f32();
+            if k < 1.0 {
+                let p = local(*p);
+                if k < 0.35 {
+                    c.fill_circle(p, 12.0, theme::ACCENT.alpha(0.7));
+                }
+                c.stroke_circle(p, 16.0 + 22.0 * k, 3.0, theme::ACCENT.alpha(1.0 - k));
             }
         }
+    }
+}
+
+impl Drop for PointerMarks {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 

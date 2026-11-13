@@ -727,8 +727,9 @@ pub mod clipboard {
                 put(CF_DIBV5 as u32, 124 + rgba.len(), |b| dibv5(w, h, rgba, b))
             }
         };
-        let seq = unsafe { GetClipboardSequenceNumber() };
         unsafe { CloseClipboard() };
+        // Closing the clipboard counts as a change too: read the number after.
+        let seq = unsafe { GetClipboardSequenceNumber() };
         result.map(|()| seq)
     }
 

@@ -20,8 +20,9 @@ pub const MAX_HEIGHT: usize = 20_000;
 pub struct Stitcher {
     w: usize,
     h: usize,
-    /// Columns left out when comparing rows (scroll bars move).
-    cmp_w: usize,
+    /// The columns compared between frames (scroll bars and window
+    /// borders at the edges change on their own).
+    cmp: (usize, usize),
     prev: Vec<u32>,
     prev_rows: Vec<u64>,
     /// Everything above the footer so far.
@@ -31,13 +32,14 @@ pub struct Stitcher {
     moved: bool,
 }
 
-fn row_hashes(px: &[u32], w: usize, cmp_w: usize) -> Vec<u64> {
+fn row_hashes(px: &[u32], w: usize, cmp: (usize, usize)) -> Vec<u64> {
     px.chunks_exact(w)
         .map(|row| {
-            // FNV-1a over the compared part of the row.
+            // FNV-1a over the compared part of the row. The lowest bits are
+            // dropped: window frames fade by a shade or two between grabs.
             let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-            for p in &row[..cmp_w] {
-                h ^= (*p & 0x00FF_FFFF) as u64;
+            for p in &row[cmp.0..cmp.1] {
+                h ^= (*p & 0x00F8_F8F8) as u64;
                 h = h.wrapping_mul(0x0100_0000_01b3);
             }
             h
@@ -94,14 +96,15 @@ pub fn find_shift(prev: &[u64], next: &[u64]) -> Option<(usize, usize, usize)> {
 
 impl Stitcher {
     pub fn new(first: Vec<u32>, w: usize, h: usize) -> Stitcher {
-        // Leave the right edge out of comparisons: that is where scroll
-        // bars live, and their thumb moves with every step.
-        let cmp_w = if w > 64 { w - 24 } else { w };
+        // Leave the edges out of comparisons: scroll bars live on the right
+        // and their thumb moves with every step; window borders on either
+        // side change colour as the window gains or loses focus.
+        let cmp = if w > 64 { (8, w - 24) } else { (0, w) };
         Stitcher {
             w,
             h,
-            cmp_w,
-            prev_rows: row_hashes(&first, w, cmp_w),
+            cmp,
+            prev_rows: row_hashes(&first, w, cmp),
             body: first.clone(),
             prev: first,
             footer: 0,
@@ -119,7 +122,7 @@ impl Stitcher {
         if frame.len() != self.w * self.h {
             return 0;
         }
-        let rows = row_hashes(&frame, self.w, self.cmp_w);
+        let rows = row_hashes(&frame, self.w, self.cmp);
         let Some((shift, _top, bottom)) = find_shift(&self.prev_rows, &rows) else {
             return 0;
         };
@@ -272,6 +275,27 @@ mod tests {
         // The last body row and the footer match the final view.
         assert_eq!(row(&img, img.h as usize - 1), row(&expect, 59));
         assert_eq!(row(&img, img.h as usize - 6), row(&expect, 54));
+    }
+
+    #[test]
+    fn flickering_edges_do_not_break_the_match() {
+        let (px, w, _) = page();
+        let mut first = view(&px, w, 0);
+        let mut next = view(&px, w, 21);
+        // A window border at the left edge, one shade apart between frames,
+        // and a scroll bar thumb on the right that moved.
+        for y in 0..60 {
+            first[y * w] = 0xFF1B_1B1B;
+            next[y * w] = 0xFF1C_1C1C;
+            first[y * w + w - 2] = if y < 20 { 0xFF80_8080 } else { 0xFFFF_FFFF };
+            next[y * w + w - 2] = if (20..40).contains(&y) {
+                0xFF80_8080
+            } else {
+                0xFFFF_FFFF
+            };
+        }
+        let mut st = Stitcher::new(first, w, 60);
+        assert_eq!(st.push(next), 21);
     }
 
     #[test]
