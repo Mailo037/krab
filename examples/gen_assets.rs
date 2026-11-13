@@ -341,6 +341,7 @@ fn desktop() -> (Vec<u32>, Vec<WinInfo>) {
     let info = |rect: RectF, title: &str| WinInfo {
         rect: RectF::new(rect.x * K, rect.y * K, rect.w * K, rect.h * K).round(),
         title: title.into(),
+        id: 0,
     };
     (
         px,

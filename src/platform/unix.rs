@@ -1,7 +1,7 @@
 //! macOS and Linux back-end, built on `xcap` (CoreGraphics on macOS,
 //! X11 / Wayland portals on Linux).
 
-use crate::capture::{Shot, WinInfo};
+use crate::capture::{Shot, WinInfo, WindowImage};
 use crate::geom::RectI;
 use crate::gfx::rgba_to_argb;
 use xcap::{Monitor, Window};
@@ -81,12 +81,41 @@ pub fn list_windows() -> Vec<WinInfo> {
                 WinInfo {
                     rect,
                     title: w.title().unwrap_or_default(),
+                    id: w.id().ok()? as u64,
                 },
             ))
         })
         .collect();
     list.sort_by_key(|w| std::cmp::Reverse(w.0));
     list.into_iter().map(|(_, w)| w).collect()
+}
+
+/// Render one window by itself. macOS composes every window separately, so
+/// asking for just this window leaves out whatever covers it.
+#[cfg(target_os = "macos")]
+pub fn capture_window(id: u64) -> Option<WindowImage> {
+    let window = Window::all()
+        .ok()?
+        .into_iter()
+        .find(|w| w.id().is_ok_and(|i| i as u64 == id))?;
+    let img = window.capture_image().ok()?;
+    let px = img
+        .as_raw()
+        .chunks_exact(4)
+        .map(|c| (c[3] as u32) << 24 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32)
+        .collect();
+    Some(WindowImage {
+        w: img.width(),
+        h: img.height(),
+        px,
+    })
+}
+
+/// X11 only keeps the visible parts of a window unless a compositor is
+/// running, so window snips keep showing the screen as it was.
+#[cfg(not(target_os = "macos"))]
+pub fn capture_window(_id: u64) -> Option<WindowImage> {
+    None
 }
 
 pub struct Grabber {

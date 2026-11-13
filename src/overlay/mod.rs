@@ -11,7 +11,7 @@ mod menu;
 mod render;
 
 use crate::annotate::{text_size, Annotation, Shape, Source, Tool};
-use crate::capture::{Shot, WinInfo};
+use crate::capture::{Shot, WinInfo, WindowImage};
 use crate::config::Config;
 use crate::geom::{Pt, RectF, RectI};
 use crate::gfx::{theme, Canvas, Color};
@@ -139,6 +139,9 @@ pub enum Outcome {
     CopyText(String),
 }
 
+/// Renders one window on its own (see `capture::grab_window`).
+pub type WindowGrabber = fn(u64) -> Option<WindowImage>;
+
 /// Per-session settings derived from the user's config.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -146,6 +149,8 @@ pub struct Options {
     pub loupe: bool,
     pub border: Option<(Color, u32)>,
     pub color: Color,
+    /// Used to show a picked window without the windows covering it.
+    pub grab_window: Option<WindowGrabber>,
 }
 
 impl Options {
@@ -155,6 +160,7 @@ impl Options {
             loupe: cfg.loupe,
             border: cfg.border.then(|| (cfg.border_color(), cfg.border_width)),
             color: cfg.annotation_color(),
+            grab_window: Some(crate::capture::grab_window),
         }
     }
 }
@@ -166,8 +172,29 @@ impl Default for Options {
             loupe: true,
             border: None,
             color: theme::PALETTE[0],
+            grab_window: None,
         }
     }
+}
+
+/// A top-level window as seen from one monitor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Win {
+    /// The part on this monitor, local pixels.
+    rect: RectI,
+    /// The whole window, local pixels; may reach past the monitor.
+    full: RectI,
+    id: u64,
+    /// Another window lies on (or casts its shadow onto) part of it.
+    covered: bool,
+}
+
+/// One step of undo history.
+#[derive(Clone)]
+struct Snapshot {
+    annotations: Vec<Annotation>,
+    /// Where the selection was.
+    rect: Option<RectF>,
 }
 
 struct Mask {
@@ -219,10 +246,13 @@ pub struct Overlay {
     original: Option<(Vec<u32>, u32, u32)>,
     scale: f32,
     opts: Options,
-    /// Window rects in local pixels, top-most first.
-    windows: Vec<RectI>,
-    /// The same rects at capture resolution.
-    captured_windows: Vec<RectI>,
+    /// Windows in local pixels, top-most first.
+    windows: Vec<Win>,
+    /// The same windows at capture resolution.
+    captured_windows: Vec<Win>,
+    /// Pixels of `px` replaced by a window rendered on its own, with what
+    /// was there before.
+    patch: Option<(RectI, Vec<u32>)>,
     ui: Shared,
 
     sel: Option<Selection>,
@@ -230,8 +260,10 @@ pub struct Overlay {
     color: Color,
     width_idx: usize,
     annotations: Vec<Annotation>,
-    undo: Vec<Vec<Annotation>>,
-    redo: Vec<Vec<Annotation>>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// Arrow keys are moving the selection; a run of them is one undo step.
+    nudging: bool,
     draft: Option<Annotation>,
     text_edit: Option<TextEdit>,
 
@@ -259,10 +291,31 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 impl Overlay {
     pub fn new(shot: Shot, windows: &[WinInfo], opts: Options, shared: Shared) -> Self {
         let bounds = RectI::new(0, 0, shot.w as i32, shot.h as i32);
-        let local: Vec<RectI> = windows
+        // Window shadows reach this far (native units) past the frame.
+        let shadow = (16.0 * shot.scale / shot.px_per_unit()).round() as i32;
+        let local: Vec<Win> = windows
             .iter()
-            .map(|w| shot.native_to_local(w.rect).intersect(&bounds))
-            .filter(|r| r.w > 8 && r.h > 8)
+            .enumerate()
+            .filter_map(|(i, w)| {
+                let full = shot.native_to_local(w.rect);
+                let rect = full.intersect(&bounds);
+                let covered = windows[..i].iter().any(|above| {
+                    let r = above.rect;
+                    let reach = RectI::new(
+                        r.x - shadow,
+                        r.y - shadow,
+                        r.w + 2 * shadow,
+                        r.h + 2 * shadow,
+                    );
+                    !reach.intersect(&w.rect).is_empty()
+                });
+                (rect.w > 8 && rect.h > 8).then_some(Win {
+                    rect,
+                    full,
+                    id: w.id,
+                    covered,
+                })
+            })
             .collect();
         let color = opts.color;
         Self {
@@ -274,6 +327,7 @@ impl Overlay {
             opts,
             captured_windows: local.clone(),
             windows: local,
+            patch: None,
             ui: shared,
             sel: None,
             tool: Tool::Select,
@@ -282,6 +336,7 @@ impl Overlay {
             annotations: Vec::new(),
             undo: Vec::new(),
             redo: Vec::new(),
+            nudging: false,
             draft: None,
             text_edit: None,
             drag: Drag::None,
@@ -381,10 +436,12 @@ impl Overlay {
 
     /// Drop the selection and everything drawn on it.
     pub fn clear_selection(&mut self) {
+        self.restore_patch();
         self.sel = None;
         self.annotations.clear();
         self.undo.clear();
         self.redo.clear();
+        self.nudging = false;
         self.draft = None;
         self.text_edit = None;
         self.drag = Drag::None;
@@ -398,9 +455,25 @@ impl Overlay {
     }
 
     fn set_selection(&mut self, rect: RectF, mask: Option<Mask>) {
+        self.select(rect, mask, None);
+    }
+
+    /// Select a window. When other windows lie on top of it, the window is
+    /// shown - and captured - on its own, as far as the platform can render
+    /// it by itself.
+    fn select_window(&mut self, win: Win) {
+        self.select(win.rect.to_f(), None, Some(win));
+    }
+
+    fn select(&mut self, rect: RectF, mask: Option<Mask>, window: Option<Win>) {
+        self.restore_patch();
+        if let Some(win) = window {
+            self.isolate(win);
+        }
         self.annotations.clear();
         self.undo.clear();
         self.redo.clear();
+        self.nudging = false;
         self.tool = Tool::Select;
         self.sel = Some(Selection {
             rect: rect.intersect(&self.bounds()).round().to_f(),
@@ -519,34 +592,113 @@ impl Overlay {
             .to_f()
     }
 
-    fn window_at(&self, p: Pt) -> Option<RectI> {
+    fn window_at(&self, p: Pt) -> Option<Win> {
         self.windows
             .iter()
             .copied()
-            .find(|r| r.contains(p.x as i32, p.y as i32))
+            .find(|w| w.rect.contains(p.x as i32, p.y as i32))
+    }
+
+    /// Replace the screen pixels of a covered window with the window
+    /// rendered on its own, so whatever lay on top of it disappears.
+    fn isolate(&mut self, win: Win) {
+        if !win.covered || self.ui.kind != Kind::Snip || win.full.w <= 0 || win.full.h <= 0 {
+            return;
+        }
+        let Some(img) = self.opts.grab_window.and_then(|grab| grab(win.id)) else {
+            return;
+        };
+        let r = win
+            .rect
+            .intersect(&RectI::new(0, 0, self.w as i32, self.h as i32));
+        if r.is_empty() || img.w == 0 || img.h == 0 {
+            return;
+        }
+        let mut saved = Vec::with_capacity((r.w * r.h) as usize);
+        for y in r.y..r.bottom() {
+            let sy = ((y - win.full.y) as i64 * img.h as i64 / win.full.h as i64)
+                .clamp(0, img.h as i64 - 1) as usize;
+            let row = y as usize * self.w as usize;
+            for x in r.x..r.right() {
+                let sx = ((x - win.full.x) as i64 * img.w as i64 / win.full.w as i64)
+                    .clamp(0, img.w as i64 - 1) as usize;
+                let dst = &mut self.px[row + x as usize];
+                saved.push(*dst);
+                *dst = over(img.px[sy * img.w as usize + sx], *dst);
+            }
+        }
+        self.patch = Some((r, saved));
+    }
+
+    /// Put back the screen pixels `isolate` replaced.
+    fn restore_patch(&mut self) {
+        let Some((r, saved)) = self.patch.take() else {
+            return;
+        };
+        let w = r.w as usize;
+        for (i, y) in (r.y..r.bottom()).enumerate() {
+            let row = y as usize * self.w as usize + r.x as usize;
+            self.px[row..row + w].copy_from_slice(&saved[i * w..(i + 1) * w]);
+        }
+        self.dirty = true;
     }
 
     // ---- history -----------------------------------------------------------
 
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            annotations: self.annotations.clone(),
+            rect: self.sel.as_ref().map(|s| s.rect),
+        }
+    }
+
+    fn restore(&mut self, snap: Snapshot) {
+        self.annotations = snap.annotations;
+        if let (Some(rect), Some(sel)) = (snap.rect, &mut self.sel) {
+            sel.rect = rect;
+        }
+        self.dirty = true;
+    }
+
+    /// Remember the current state before changing it.
     fn checkpoint(&mut self) {
-        self.undo.push(self.annotations.clone());
+        let snap = self.snapshot();
+        self.push_undo(snap);
+    }
+
+    fn push_undo(&mut self, snap: Snapshot) {
+        self.undo.push(snap);
         self.redo.clear();
+        self.nudging = false;
     }
 
     pub fn undo(&mut self) {
         self.commit_text();
+        self.nudging = false;
         if let Some(prev) = self.undo.pop() {
-            self.redo
-                .push(std::mem::replace(&mut self.annotations, prev));
-            self.dirty = true;
+            let now = self.snapshot();
+            self.redo.push(now);
+            self.restore(prev);
         }
     }
 
     pub fn redo(&mut self) {
+        self.nudging = false;
         if let Some(next) = self.redo.pop() {
-            self.undo
-                .push(std::mem::replace(&mut self.annotations, next));
-            self.dirty = true;
+            let now = self.snapshot();
+            self.undo.push(now);
+            self.restore(next);
+        }
+    }
+
+    /// A finished move or resize of the selection becomes one undo step.
+    fn record_adjustment(&mut self, orig: RectF) {
+        if self.sel.as_ref().is_some_and(|s| s.rect != orig) {
+            let snap = Snapshot {
+                annotations: self.annotations.clone(),
+                rect: Some(orig),
+            };
+            self.push_undo(snap);
         }
     }
 
@@ -701,7 +853,7 @@ impl Overlay {
         self.hover_btn = bars.hit(p);
         self.hover_window = None;
         if self.sel.is_none() && self.ui.mode == Mode::Window && !bars.contains(p) {
-            self.hover_window = self.window_at(p);
+            self.hover_window = self.window_at(p).map(|w| w.rect);
         }
     }
 
@@ -769,13 +921,10 @@ impl Overlay {
                 self.drag = Drag::Lasso { pts: vec![p] };
                 self.started_selection = true;
             }
-            Mode::Window => {
-                let rect = self
-                    .window_at(p)
-                    .map(|r| r.to_f())
-                    .unwrap_or_else(|| self.bounds());
-                self.set_selection(rect, None);
-            }
+            Mode::Window => match self.window_at(p) {
+                Some(win) => self.select_window(win),
+                None => self.select_all(),
+            },
             Mode::Fullscreen => self.select_all(),
         }
     }
@@ -863,7 +1012,8 @@ impl Overlay {
     fn release(&mut self) {
         let p = self.cursor;
         match std::mem::replace(&mut self.drag, Drag::None) {
-            Drag::None | Drag::Move { .. } | Drag::Resize { .. } | Drag::Erase { .. } => {}
+            Drag::None | Drag::Erase { .. } => {}
+            Drag::Move { orig, .. } | Drag::Resize { orig, .. } => self.record_adjustment(orig),
             Drag::Button(btn) => {
                 if self.bars().hit(p) == Some(btn) {
                     self.activate(btn);
@@ -980,8 +1130,7 @@ impl Overlay {
             if let Drag::Erase { checkpointed } = &mut self.drag {
                 if !*checkpointed {
                     *checkpointed = true;
-                    self.undo.push(self.annotations.clone());
-                    self.redo.clear();
+                    self.checkpoint();
                 }
             }
             self.annotations.remove(i);
@@ -1036,6 +1185,12 @@ impl Overlay {
     /// Esc: undo one level of state, closing at the outermost.
     fn step_back(&mut self) {
         if !matches!(self.drag, Drag::None) {
+            // Cancel the drag: a moved or resized selection goes back.
+            if let Drag::Move { orig, .. } | Drag::Resize { orig, .. } = self.drag {
+                if let Some(sel) = &mut self.sel {
+                    sel.rect = orig;
+                }
+            }
             self.drag = Drag::None;
             self.draft = None;
         } else if self.text_edit.is_some() {
@@ -1183,24 +1338,35 @@ impl Overlay {
             _ => (0.0, step),
         };
         let b = self.bounds();
+        let Some(r) = self.sel.as_ref().map(|s| s.rect) else {
+            return;
+        };
+        let moved = if self.mods.ctrl {
+            // Grow / shrink from the bottom-right corner.
+            RectF::new(
+                r.x,
+                r.y,
+                (r.w + dx).clamp(1.0, b.w - r.x),
+                (r.h + dy).clamp(1.0, b.h - r.y),
+            )
+        } else {
+            RectF::new(
+                (r.x + dx).clamp(0.0, b.w - r.w),
+                (r.y + dy).clamp(0.0, b.h - r.h),
+                r.w,
+                r.h,
+            )
+        };
+        if moved == r {
+            return;
+        }
+        // Holding an arrow key repeats it; the whole run is one undo step.
+        if !self.nudging {
+            self.checkpoint();
+            self.nudging = true;
+        }
         if let Some(sel) = &mut self.sel {
-            let r = sel.rect;
-            sel.rect = if self.mods.ctrl {
-                // Grow / shrink from the bottom-right corner.
-                RectF::new(
-                    r.x,
-                    r.y,
-                    (r.w + dx).clamp(1.0, b.w - r.x),
-                    (r.h + dy).clamp(1.0, b.h - r.y),
-                )
-            } else {
-                RectF::new(
-                    (r.x + dx).clamp(0.0, b.w - r.w),
-                    (r.y + dy).clamp(0.0, b.h - r.h),
-                    r.w,
-                    r.h,
-                )
-            };
+            sel.rect = moved;
         }
     }
 
@@ -1234,6 +1400,10 @@ impl Overlay {
         self.dirty = true;
         match btn {
             Btn::Kind(k) => {
+                if k == Kind::Record {
+                    // Recordings show the live screen, not an isolated window.
+                    self.restore_patch();
+                }
                 self.ui.kind = k;
                 if k == Kind::Record && self.ui.mode == Mode::Freeform {
                     self.ui.mode = Mode::Rect;
@@ -1320,6 +1490,21 @@ fn handle_cursor(h: Handle) -> CursorKind {
         Handle::E | Handle::W => CursorKind::ResizeEw,
         Handle::Ne | Handle::Sw => CursorKind::ResizeNesw,
         Handle::Nw | Handle::Se => CursorKind::ResizeNwse,
+    }
+}
+
+/// Premultiplied `src` over the opaque pixel `dst`.
+fn over(src: u32, dst: u32) -> u32 {
+    let a = src >> 24;
+    match a {
+        255 => src,
+        0 => dst,
+        _ => {
+            let inv = 255 - a;
+            let ch =
+                |s: u32| ((((src >> s) & 0xFF) + ((dst >> s) & 0xFF) * inv / 255).min(255)) << s;
+            0xFF00_0000 | ch(16) | ch(8) | ch(0)
+        }
     }
 }
 

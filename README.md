@@ -61,6 +61,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | | Krab |
 |---|---|
 | Rectangle, freeform, window and full-screen snips | yes |
+| Window snips leave out windows lying on top of the app | yes (Windows, macOS) |
 | Delayed snips (3 / 5 / 10 s, or any value from the command line) | yes |
 | Pen, highlighter, eraser | yes |
 | Shapes: line, arrow, rectangle, ellipse | yes |
@@ -68,7 +69,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Pixelate / redact | yes |
 | Colour picker with pixel loupe (copies the hex value) | yes |
 | Crop after selecting (move and resize handles, arrow keys) | yes |
-| Undo / redo | yes |
+| Undo / redo | yes, for markup and for moving / resizing the selection |
 | Copy to clipboard | yes |
 | Save as PNG, JPEG, BMP or GIF | yes |
 | Automatic save to `Pictures/Screenshots` | yes |
@@ -202,13 +203,13 @@ krab --record             # choose an area and record it
 |---|---|
 | `Enter`, `Ctrl+C` or double click | copy and close |
 | `Ctrl+S` | save as... |
-| `Ctrl+Z` / `Ctrl+Y` | undo / redo |
+| `Ctrl+Z` / `Ctrl+Y` | undo / redo (markup, moving and resizing) |
 | `Ctrl+A` | select the whole screen |
 | `V` `P` `H` `L` `A` `R` `E` `T` `B` `X` `I` | move, pen, highlighter, line, arrow, rectangle, ellipse, text, pixelate, eraser, colour picker |
 | arrow keys (`Shift` = 10 px, `Ctrl` = resize) | nudge the selection |
 | `Shift` while drawing | straight strokes, 45 degree lines, squares and circles |
 | mouse wheel | stroke size |
-| `Esc` | step back (text, then selection, then close) |
+| `Esc` | step back (a drag in progress, text, then selection, then close) |
 | right click | menu: copy, save, copy text, copy colour, select the window under the pointer, undo |
 
 On macOS use `Cmd` instead of `Ctrl`.

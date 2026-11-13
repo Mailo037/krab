@@ -173,6 +173,7 @@ fn menu_selects_the_window_under_the_pointer() {
     let windows = [WinInfo {
         rect: RectI::new(200, 150, 300, 200),
         title: "editor".into(),
+        id: 1,
     }];
     let mut o = Overlay::new(
         shot(),
@@ -213,10 +214,12 @@ fn window_mode_selects_topmost_window_under_cursor() {
         WinInfo {
             rect: RectI::new(100, 80, 120, 90),
             title: "front".into(),
+            id: 2,
         },
         WinInfo {
             rect: RectI::new(60, 50, 300, 200),
             title: "back".into(),
+            id: 3,
         },
     ];
     let mut o = Overlay::new(
@@ -422,6 +425,189 @@ fn move_and_resize_adjust_the_selection() {
     assert_eq!(o.selection(), Some(RectI::new(120, 110, 140, 110)));
     o.key(Key::Left);
     assert_eq!(o.selection(), Some(RectI::new(119, 110, 140, 110)));
+}
+
+fn ctrl_key(o: &mut Overlay, c: char, shift: bool) {
+    o.set_mods(Mods {
+        ctrl: true,
+        shift,
+        ..Mods::default()
+    });
+    o.key(Key::Char(c));
+    o.set_mods(Mods::default());
+}
+
+#[test]
+fn undo_and_redo_restore_moves_and_resizes() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (200.0, 180.0));
+    let first = RectI::new(100, 100, 100, 80);
+    drag(&mut o, (150.0, 140.0), (170.0, 150.0)); // move by (20, 10)
+    let moved = RectI::new(120, 110, 100, 80);
+    drag(&mut o, (220.0, 190.0), (260.0, 220.0)); // bottom-right handle
+    let resized = RectI::new(120, 110, 140, 110);
+    assert_eq!(o.selection(), Some(resized));
+
+    ctrl_key(&mut o, 'z', false);
+    assert_eq!(o.selection(), Some(moved));
+    ctrl_key(&mut o, 'z', false);
+    assert_eq!(o.selection(), Some(first));
+    ctrl_key(&mut o, 'z', false);
+    assert_eq!(o.selection(), Some(first), "nothing older to undo");
+    ctrl_key(&mut o, 'y', false);
+    assert_eq!(o.selection(), Some(moved));
+    ctrl_key(&mut o, 'z', true); // Ctrl+Shift+Z redoes too
+    assert_eq!(o.selection(), Some(resized));
+}
+
+#[test]
+fn a_run_of_arrow_keys_is_one_undo_step() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (200.0, 180.0));
+    let first = RectI::new(100, 100, 100, 80);
+    for _ in 0..5 {
+        o.key(Key::Right);
+    }
+    o.set_mods(Mods {
+        ctrl: true,
+        ..Mods::default()
+    });
+    o.key(Key::Down); // Ctrl+arrow resizes
+    o.set_mods(Mods::default());
+    let nudged = RectI::new(105, 100, 100, 81);
+    assert_eq!(o.selection(), Some(nudged));
+    ctrl_key(&mut o, 'z', false);
+    assert_eq!(o.selection(), Some(first));
+    ctrl_key(&mut o, 'y', false);
+    assert_eq!(o.selection(), Some(nudged));
+}
+
+#[test]
+fn undo_walks_back_through_markup_and_moves_in_order() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (380.0, 280.0));
+    let first = RectI::new(20, 20, 360, 260);
+    o.activate(Btn::Tool(Tool::Rect));
+    drag(&mut o, (100.0, 100.0), (200.0, 180.0));
+    o.activate(Btn::Tool(Tool::Select));
+    drag(&mut o, (300.0, 250.0), (310.0, 260.0)); // move by (10, 10)
+    assert_eq!(o.selection(), Some(RectI::new(30, 30, 360, 260)));
+    assert_eq!(o.annotation_count(), 1);
+
+    o.undo();
+    assert_eq!(o.selection(), Some(first));
+    assert_eq!(o.annotation_count(), 1, "the move is undone first");
+    o.undo();
+    assert_eq!(o.annotation_count(), 0);
+    o.redo();
+    o.redo();
+    assert_eq!(o.selection(), Some(RectI::new(30, 30, 360, 260)));
+    assert_eq!(o.annotation_count(), 1);
+}
+
+#[test]
+fn escape_during_a_move_puts_the_selection_back() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (200.0, 180.0));
+    o.pointer_moved(150.0, 140.0);
+    o.pointer_button(Button::Left, true);
+    o.pointer_moved(190.0, 170.0);
+    o.key(Key::Escape);
+    o.pointer_button(Button::Left, false);
+    assert_eq!(o.selection(), Some(RectI::new(100, 100, 100, 80)));
+    assert!(o.undo.is_empty(), "a cancelled move leaves no undo step");
+}
+
+/// Stand-in for the platform: every window renders as solid 0x123456,
+/// except its top-left pixel, which it does not draw.
+fn fake_window(_id: u64) -> Option<WindowImage> {
+    let (w, h) = (300, 200);
+    let mut px = vec![0xFF12_3456; (w * h) as usize];
+    px[0] = 0;
+    Some(WindowImage { w, h, px })
+}
+
+fn stacked_windows(mode: Mode) -> Overlay {
+    let wins = [
+        WinInfo {
+            rect: RectI::new(100, 80, 120, 90),
+            title: "front".into(),
+            id: 1,
+        },
+        WinInfo {
+            rect: RectI::new(60, 50, 300, 200),
+            title: "back".into(),
+            id: 2,
+        },
+    ];
+    let opts = Options {
+        grab_window: Some(fake_window),
+        ..Options::default()
+    };
+    Overlay::new(
+        shot(),
+        &wins,
+        opts,
+        Shared {
+            mode,
+            kind: Kind::Snip,
+            delay: 3,
+        },
+    )
+}
+
+#[test]
+fn window_snip_leaves_out_the_windows_on_top() {
+    let mut o = stacked_windows(Mode::Window);
+    click(&mut o, (70.0, 60.0)); // the back window, beside the front one
+    assert_eq!(o.selection(), Some(RectI::new(60, 50, 300, 200)));
+    let img = o.compose().unwrap();
+    // Where the front window lay, the back window's own pixels show.
+    assert_eq!(pixel(&img, 100, 60), [0x12, 0x34, 0x56, 255]);
+    assert_eq!(pixel(&img, 299, 199), [0x12, 0x34, 0x56, 255]);
+    // A pixel the window did not draw keeps the screen.
+    assert_eq!(pixel(&img, 0, 0), [0, 60, 50, 255]);
+
+    // Starting over brings back the screen as captured.
+    o.key(Key::Escape);
+    o.activate(Btn::Mode(Mode::Rect));
+    drag(&mut o, (60.0, 50.0), (360.0, 250.0));
+    assert_eq!(pixel(&o.compose().unwrap(), 100, 60), [0, 160, 110, 255]);
+}
+
+#[test]
+fn window_snip_of_the_top_window_keeps_the_screen() {
+    let mut o = stacked_windows(Mode::Window);
+    click(&mut o, (150.0, 100.0));
+    assert_eq!(o.selection(), Some(RectI::new(100, 80, 120, 90)));
+    assert_eq!(pixel(&o.compose().unwrap(), 10, 10), [0, 110, 90, 255]);
+}
+
+#[test]
+fn menu_window_snip_also_leaves_out_the_windows_on_top() {
+    let mut o = stacked_windows(Mode::Rect);
+    o.pointer_moved(70.0, 60.0);
+    o.pointer_button(Button::Right, true);
+    let items = o.menu.as_ref().unwrap().items.clone();
+    let idx = items
+        .iter()
+        .position(|i| *i == Some(menu::Item::SnipWindow))
+        .expect("window entry");
+    o.run_menu(idx);
+    assert_eq!(o.selection(), Some(RectI::new(60, 50, 300, 200)));
+    assert_eq!(
+        pixel(&o.compose().unwrap(), 100, 60),
+        [0x12, 0x34, 0x56, 255]
+    );
+}
+
+#[test]
+fn recording_a_window_shows_the_live_screen() {
+    let mut o = stacked_windows(Mode::Window);
+    o.activate(Btn::Kind(Kind::Record));
+    click(&mut o, (70.0, 60.0));
+    assert_eq!(o.selection(), Some(RectI::new(60, 50, 300, 200)));
+    assert_eq!(o.px[(100 * W + 150) as usize], src_px(150, 100));
 }
 
 #[test]
@@ -641,6 +827,7 @@ fn a_temporary_size_mismatch_does_not_degrade_the_capture() {
     let wins = [WinInfo {
         rect: RectI::new(100, 80, 120, 90),
         title: "w".into(),
+        id: 4,
     }];
     let shared = Shared {
         mode: Mode::Window,

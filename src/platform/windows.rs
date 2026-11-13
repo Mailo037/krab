@@ -2,7 +2,7 @@
 //! no COM and no GPU device, which is what keeps cold starts in the low
 //! milliseconds.
 
-use crate::capture::{Shot, WinInfo};
+use crate::capture::{Shot, WinInfo, WindowImage};
 use crate::geom::RectI;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
@@ -14,19 +14,22 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
-    GetDC, GetMonitorInfoW, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, CAPTUREBLT,
-    DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, SRCCOPY,
+    GdiFlush, GetDC, GetMonitorInfoW, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER,
+    CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    SRCCOPY,
 };
+use windows_sys::Win32::Storage::Xps::PrintWindow;
 use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows_sys::Win32::UI::HiDpi::{
-    GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-    MDT_EFFECTIVE_DPI,
+    GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, EnumWindows, GetClassNameW, GetCursorPos, GetMessagePos,
-    GetWindowLongW, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible, ASFW_ANY,
-    GWL_EXSTYLE, WM_NCACTIVATE, WM_NCDESTROY, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GetWindowLongW, GetWindowRect, GetWindowTextW, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, ASFW_ANY, GWL_EXSTYLE, PW_RENDERFULLCONTENT, WM_NCACTIVATE, WM_NCDESTROY,
+    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 const MONITORINFOF_PRIMARY: u32 = 1;
@@ -96,7 +99,12 @@ pub fn suppress_caption_paint(window: &winit::window::Window) {
         return;
     };
     unsafe {
-        SetWindowSubclass(h.hwnd.get() as HWND, Some(no_caption_proc), NO_CAPTION_ID, 0);
+        SetWindowSubclass(
+            h.hwnd.get() as HWND,
+            Some(no_caption_proc),
+            NO_CAPTION_ID,
+            0,
+        );
     }
 }
 
@@ -331,7 +339,11 @@ unsafe extern "system" fn window_cb(hwnd: HWND, data: LPARAM) -> BOOL {
     }
     let rect = RectI::new(r.left, r.top, r.right - r.left, r.bottom - r.top);
     if rect.w > 8 && rect.h > 8 {
-        list.push(WinInfo { rect, title });
+        list.push(WinInfo {
+            rect,
+            title,
+            id: hwnd as usize as u64,
+        });
     }
     1
 }
@@ -343,6 +355,96 @@ pub fn list_windows() -> Vec<WinInfo> {
         EnumWindows(Some(window_cb), &mut list as *mut _ as LPARAM);
     }
     list
+}
+
+/// Render one window by itself, without the windows on top of it.
+///
+/// `PrintWindow` with `PW_RENDERFULLCONTENT` copies the window's own DWM
+/// surface, so it also works for GPU-drawn apps (browsers, Electron) and does
+/// not care what covers the window - including our overlay.
+pub fn capture_window(id: u64) -> Option<WindowImage> {
+    let hwnd = id as usize as HWND;
+    unsafe {
+        // A hung window would never answer and freeze the overlay with it.
+        if IsWindow(hwnd) == 0 || IsIconic(hwnd) != 0 || IsHungAppWindow(hwnd) != 0 {
+            return None;
+        }
+        let mut wr: RECT = zeroed();
+        if GetWindowRect(hwnd, &mut wr) == 0 {
+            return None;
+        }
+        // The visible frame; GetWindowRect includes the invisible resize border.
+        let mut fr = wr;
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut fr as *mut RECT as *mut c_void,
+            size_of::<RECT>() as u32,
+        );
+        let blit = Blitter::new(wr.right - wr.left, wr.bottom - wr.top).ok()?;
+        let n = (blit.w * blit.h) as usize;
+        std::ptr::write_bytes(blit.bits as *mut u32, 0, n);
+        if PrintWindow(hwnd, blit.mem, PW_RENDERFULLCONTENT) == 0 {
+            return None;
+        }
+        GdiFlush();
+        let frame = RectI::new(
+            fr.left - wr.left,
+            fr.top - wr.top,
+            fr.right - fr.left,
+            fr.bottom - fr.top,
+        )
+        .intersect(&RectI::new(0, 0, blit.w, blit.h));
+        if frame.is_empty() {
+            return None;
+        }
+        let src = std::slice::from_raw_parts(blit.bits, n);
+        let mut px = Vec::with_capacity((frame.w * frame.h) as usize);
+        for y in frame.y..frame.bottom() {
+            let row = (y * blit.w) as usize;
+            let line = &src[row + frame.x as usize..row + frame.right() as usize];
+            px.extend(line.iter().map(|p| p | 0xFF00_0000));
+        }
+        let dpi = GetDpiForWindow(hwnd).max(96);
+        let radius = (8 * dpi).div_ceil(96) as i32 + 1;
+        clear_corners(&mut px, frame.w, frame.h, radius);
+        Some(WindowImage {
+            w: frame.w as u32,
+            h: frame.h as u32,
+            px,
+        })
+    }
+}
+
+/// Windows 11 rounds window corners when it composes the screen, so the
+/// window's own surface may come back with black where the rounding cuts
+/// away. Mark black pixels outside the corner arcs as not drawn, so the screen
+/// as captured shows through there.
+fn clear_corners(px: &mut [u32], w: i32, h: i32, r: i32) {
+    if w < 2 * r || h < 2 * r {
+        return;
+    }
+    let rf = r as f32;
+    for dy in 0..r {
+        for dx in 0..r {
+            // Distance from the arc's centre, measured at the pixel centre.
+            let (ox, oy) = (rf - dx as f32 - 0.5, rf - dy as f32 - 0.5);
+            if ox * ox + oy * oy <= (rf - 1.0) * (rf - 1.0) {
+                continue;
+            }
+            for (x, y) in [
+                (dx, dy),
+                (w - 1 - dx, dy),
+                (dx, h - 1 - dy),
+                (w - 1 - dx, h - 1 - dy),
+            ] {
+                let p = &mut px[(y * w + x) as usize];
+                if *p & 0x00FF_FFFF == 0 {
+                    *p = 0;
+                }
+            }
+        }
+    }
 }
 
 pub struct Grabber {

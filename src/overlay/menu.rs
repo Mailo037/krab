@@ -1,7 +1,7 @@
 //! The right-click menu of the overlay.
 
-use super::{Finish, Kind, Outcome, Overlay};
-use crate::geom::{Pt, RectF, RectI};
+use super::{Finish, Kind, Outcome, Overlay, Win};
+use crate::geom::{Pt, RectF};
 use crate::gfx::icons::{self, Icon};
 use crate::gfx::{text, theme, Canvas, Color};
 use std::time::Instant;
@@ -29,7 +29,7 @@ pub(super) struct Menu {
     /// Pixel under the pointer when the menu opened.
     pub color: Color,
     /// Window under the pointer when the menu opened.
-    pub window: Option<RectI>,
+    pub window: Option<Win>,
 }
 
 const ITEM_H: f32 = 30.0;
@@ -47,7 +47,9 @@ impl Overlay {
         } else {
             Color::BLACK
         };
-        let window = self.window_at(at).filter(|w| self.selection() != Some(*w));
+        let window = self
+            .window_at(at)
+            .filter(|w| self.selection() != Some(w.rect));
         let mut items: Vec<Option<Item>> = Vec::new();
         let has_sel = self.sel.is_some();
         match (has_sel, self.ui.kind) {
@@ -241,7 +243,7 @@ impl Overlay {
             }
             Item::SnipWindow => {
                 if let Some(w) = menu.window {
-                    self.set_selection(w.to_f(), None);
+                    self.select_window(w);
                 }
             }
             Item::SnipScreen => self.select_all(),

@@ -59,6 +59,27 @@ impl Shot {
 pub struct WinInfo {
     pub rect: RectI,
     pub title: String,
+    /// The platform's handle for the window (HWND, CGWindowID, X11 id).
+    pub id: u64,
+}
+
+/// One window rendered on its own, without whatever lies on top of it.
+///
+/// Covers the window's `WinInfo::rect`. Pixels are `0xAARRGGBB` with
+/// premultiplied alpha; alpha 0 marks pixels the window did not draw (rounded
+/// corners), where the screen as captured shows through.
+pub struct WindowImage {
+    pub w: u32,
+    pub h: u32,
+    pub px: Vec<u32>,
+}
+
+/// Render window `id` on its own. `None` when the platform cannot do that
+/// for this window (Linux, hung or minimized windows, protected content).
+pub fn grab_window(id: u64) -> Option<WindowImage> {
+    let img = platform::capture_window(id)?;
+    let drawn = img.px.iter().any(|p| p & 0x00FF_FFFF != 0);
+    (img.w > 0 && img.h > 0 && img.px.len() == (img.w * img.h) as usize && drawn).then_some(img)
 }
 
 pub struct Capture {

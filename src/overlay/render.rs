@@ -1,7 +1,7 @@
 //! Drawing the overlay: dimmed screenshot, selection, markup and toolbars.
 
 use super::layout::{Bar, Bars};
-use super::{edit_size, Btn, Drag, Kind, Mask, Mode, Overlay};
+use super::{edit_size, Btn, Drag, Kind, Mask, Mode, Overlay, Win};
 use crate::annotate::{Annotation, Shape, Source, Tool};
 use crate::geom::{Pt, RectF, RectI};
 use crate::gfx::{icons, text, theme, Canvas, Color};
@@ -42,6 +42,8 @@ impl Overlay {
         if (w, h) == (self.w, self.h) {
             return;
         }
+        // Resampling starts from the capture as taken, not an isolated window.
+        self.restore_patch();
         let (src, sw, sh) = match self.original.take() {
             Some(original) => original,
             None => (std::mem::take(&mut self.px), self.w, self.h),
@@ -62,17 +64,22 @@ impl Overlay {
             self.original = Some((src, sw, sh));
         }
         let (kx, ky) = (w as f32 / sw as f32, h as f32 / sh as f32);
+        let scale = |r: RectI| {
+            RectF::new(
+                r.x as f32 * kx,
+                r.y as f32 * ky,
+                r.w as f32 * kx,
+                r.h as f32 * ky,
+            )
+            .round()
+        };
         self.windows = self
             .captured_windows
             .iter()
-            .map(|r| {
-                RectF::new(
-                    r.x as f32 * kx,
-                    r.y as f32 * ky,
-                    r.w as f32 * kx,
-                    r.h as f32 * ky,
-                )
-                .round()
+            .map(|win| Win {
+                rect: scale(win.rect),
+                full: scale(win.full),
+                ..*win
             })
             .collect();
         self.w = w;
