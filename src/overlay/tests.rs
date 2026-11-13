@@ -557,6 +557,35 @@ fn stacked_windows(mode: Mode) -> Overlay {
 }
 
 #[test]
+fn a_covered_corner_takes_the_window_edge_not_the_window_on_top() {
+    let wins = [
+        WinInfo {
+            rect: RectI::new(40, 30, 80, 60), // lies on the back window's corner
+            title: "front".into(),
+            id: 1,
+        },
+        WinInfo {
+            rect: RectI::new(60, 50, 300, 200),
+            title: "back".into(),
+            id: 2,
+        },
+    ];
+    let opts = Options {
+        grab_window: Some(fake_window),
+        ..Options::default()
+    };
+    let shared = Shared {
+        mode: Mode::Window,
+        kind: Kind::Snip,
+        delay: 3,
+    };
+    let mut o = Overlay::new(shot(), &wins, opts, shared);
+    click(&mut o, (300.0, 200.0));
+    assert_eq!(o.selection(), Some(RectI::new(60, 50, 300, 200)));
+    assert_eq!(pixel(&o.compose().unwrap(), 0, 0), [0x12, 0x34, 0x56, 255]);
+}
+
+#[test]
 fn window_snip_leaves_out_the_windows_on_top() {
     let mut o = stacked_windows(Mode::Window);
     click(&mut o, (70.0, 60.0)); // the back window, beside the front one

@@ -669,17 +669,43 @@ impl Overlay {
         if r.is_empty() || img.w == 0 || img.h == 0 {
             return;
         }
+        // Where the window did not draw (rounded corners), the screen shows
+        // what lies behind it - unless another window lies there instead.
+        let shadow = (16.0 * self.scale).round() as i32;
+        let above: Vec<RectI> = self
+            .windows
+            .iter()
+            .take_while(|w| w.id != win.id)
+            .map(|w| {
+                let r = w.rect;
+                RectI::new(
+                    r.x - shadow,
+                    r.y - shadow,
+                    r.w + 2 * shadow,
+                    r.h + 2 * shadow,
+                )
+            })
+            .collect();
+        let iw = img.w as usize;
         let mut saved = Vec::with_capacity((r.w * r.h) as usize);
         for y in r.y..r.bottom() {
             let sy = ((y - win.full.y) as i64 * img.h as i64 / win.full.h as i64)
                 .clamp(0, img.h as i64 - 1) as usize;
+            let line = &img.px[sy * iw..(sy + 1) * iw];
             let row = y as usize * self.w as usize;
             for x in r.x..r.right() {
                 let sx = ((x - win.full.x) as i64 * img.w as i64 / win.full.w as i64)
                     .clamp(0, img.w as i64 - 1) as usize;
                 let dst = &mut self.px[row + x as usize];
                 saved.push(*dst);
-                *dst = over(img.px[sy * img.w as usize + sx], *dst);
+                let src = line[sx];
+                let behind = if src >> 24 == 255 || !above.iter().any(|a| a.contains(x, y)) {
+                    *dst
+                } else {
+                    // Square the corner off with the window's own edge.
+                    drawn_inward(line, sx)
+                };
+                *dst = over(src, behind);
             }
         }
         self.patch = Some((r, saved));
@@ -1723,6 +1749,17 @@ fn handle_cursor(h: Handle) -> CursorKind {
         Handle::Ne | Handle::Sw => CursorKind::ResizeNesw,
         Handle::Nw | Handle::Se => CursorKind::ResizeNwse,
     }
+}
+
+/// The nearest fully drawn pixel from `x` towards the middle of `line`.
+fn drawn_inward(line: &[u32], x: usize) -> u32 {
+    let mid = line.len() / 2;
+    let found = if x < mid {
+        line[x..=mid].iter().find(|p| *p >> 24 == 255)
+    } else {
+        line[mid..=x].iter().rev().find(|p| *p >> 24 == 255)
+    };
+    found.copied().unwrap_or(0xFF00_0000)
 }
 
 /// Premultiplied `src` over the opaque pixel `dst`.
