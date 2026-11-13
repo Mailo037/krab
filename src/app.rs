@@ -374,6 +374,7 @@ impl App {
             && self.busy == 0
             && self.pending.is_none()
             && self.settings.is_none()
+            && !output::clipboard_busy()
     }
 
     /// Make sure a hidden overlay window exists for every connected monitor.
@@ -1135,6 +1136,10 @@ impl App {
         }
         if let Some((t, _)) = &self.settle {
             consider(*t);
+        }
+        if output::clipboard_busy() {
+            // Poll until the background copy is done, then exit if idle.
+            consider(now + Duration::from_millis(40));
         }
         for win in &self.huds {
             if let Some(t) = win.expires {

@@ -186,6 +186,25 @@ pub fn hold_clipboard(kind: &str, path: &Path) -> Result<(), String> {
     if kind == "text" {
         let text = String::from_utf8(data).map_err(|e| e.to_string())?;
         cb.set().wait().text(text).map_err(|e| e.to_string())
+    } else if kind == "rgba" {
+        // Width and height, then the raw pixels: no PNG round trip.
+        if data.len() < 8 {
+            return Err("truncated image".into());
+        }
+        let w = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+        let h = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+        let px = data[8..].to_vec();
+        if px.len() != w * h * 4 {
+            return Err("truncated image".into());
+        }
+        cb.set()
+            .wait()
+            .image(arboard::ImageData {
+                width: w,
+                height: h,
+                bytes: Cow::Owned(px),
+            })
+            .map_err(|e| e.to_string())
     } else {
         let img = image::load_from_memory(&data)
             .map_err(|e| e.to_string())?
@@ -202,12 +221,41 @@ pub fn hold_clipboard(kind: &str, path: &Path) -> Result<(), String> {
     }
 }
 
+/// Clipboard work still running in the background.
+static CLIPBOARD_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Whether a copy is still being completed in the background (the process
+/// should not exit yet).
+pub fn clipboard_busy() -> bool {
+    CLIPBOARD_JOBS.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
 pub fn copy_image(img: &Image) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::sync::atomic::Ordering;
+        // The bitmap is on the clipboard right away; the PNG many programs
+        // prefer (it keeps transparency) follows once it is encoded.
+        let seq = crate::platform::clipboard::set_image(img.w, img.h, &img.rgba)?;
+        let img = img.clone();
+        CLIPBOARD_JOBS.fetch_add(1, Ordering::SeqCst);
+        std::thread::spawn(move || {
+            if let Ok(png) = img.encode("png", 100) {
+                crate::platform::clipboard::add_png(&png, seq);
+            }
+            CLIPBOARD_JOBS.fetch_sub(1, Ordering::SeqCst);
+        });
+        Ok(())
+    }
     #[cfg(target_os = "linux")]
     {
-        spawn_holder("image", &img.encode("png", 100)?)
+        let mut raw = Vec::with_capacity(8 + img.rgba.len());
+        raw.extend_from_slice(&img.w.to_le_bytes());
+        raw.extend_from_slice(&img.h.to_le_bytes());
+        raw.extend_from_slice(&img.rgba);
+        spawn_holder("rgba", &raw)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
     {
         arboard::Clipboard::new()
             .and_then(|mut cb| {
@@ -277,6 +325,25 @@ mod tests {
         assert_eq!(&rgb[3..6], &[5, 100, 200]);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn clipboard_bitmap_is_bottom_up_bgra() {
+        let img = sample();
+        let mut out = vec![0u8; 124 + img.rgba.len()];
+        crate::platform::clipboard::dibv5(img.w, img.h, &img.rgba, &mut out);
+        assert_eq!(u32::from_le_bytes(out[0..4].try_into().unwrap()), 124);
+        assert_eq!(
+            i32::from_le_bytes(out[8..12].try_into().unwrap()),
+            6,
+            "bottom-up"
+        );
+        // The first source row lands last; pixel (0,0) is fully transparent.
+        let last_row = 124 + 5 * 8 * 4;
+        assert_eq!(&out[last_row..last_row + 4], &[200, 100, 0, 0]);
+        // Pixel (1,0): r=5, g=100, b=200 becomes B,G,R,A.
+        assert_eq!(&out[last_row + 4..last_row + 8], &[200, 100, 5, 255]);
+    }
+
     #[test]
     fn unique_path_avoids_existing_files() {
         let dir = std::env::temp_dir().join(format!("krab-test-{}", std::process::id()));
@@ -287,5 +354,30 @@ mod tests {
         // Same second -> must not collide; different second -> trivially distinct.
         assert_ne!(a, b);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(all(test, windows))]
+mod clipboard_timing {
+    /// `cargo test --release --lib clipboard_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn clipboard_cost() {
+        use image::ImageEncoder;
+        let (w, h) = (3840u32, 2160u32);
+        let rgba: Vec<u8> = (0..w * h * 4)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8 | 0x0F)
+            .collect();
+        let t = std::time::Instant::now();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, w, h, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let before = t.elapsed();
+        let t = std::time::Instant::now();
+        let mut dib = vec![0u8; 124 + rgba.len()];
+        crate::platform::clipboard::dibv5(w, h, &rgba, &mut dib);
+        let now = t.elapsed();
+        println!("4K copy before clipboard is set: arboard PNG {before:?} vs DIB {now:?}");
     }
 }

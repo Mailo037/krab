@@ -638,3 +638,116 @@ pub fn disable_snipping_tool_on_print_screen() -> std::io::Result<()> {
     }
     Ok(())
 }
+
+/// The system clipboard, used directly for images: arboard PNG-encodes
+/// every image before anything is on the clipboard, which takes a
+/// noticeable moment for a full-screen snip.
+pub mod clipboard {
+    use std::ptr::null_mut;
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber, OpenClipboard,
+        RegisterClipboardFormatW, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE,
+    };
+    use windows_sys::Win32::System::Ole::CF_DIBV5;
+
+    /// Open the clipboard, retrying while another program holds it.
+    fn open() -> Result<(), String> {
+        for _ in 0..20 {
+            if unsafe { OpenClipboard(null_mut()) } != 0 {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Err("the clipboard is in use by another program".into())
+    }
+
+    /// Hand `bytes` to the open clipboard as `format`.
+    unsafe fn put(format: u32, len: usize, fill: impl FnOnce(&mut [u8])) -> Result<(), String> {
+        let h = GlobalAlloc(GMEM_MOVEABLE, len);
+        if h.is_null() {
+            return Err("out of memory".into());
+        }
+        let p = GlobalLock(h) as *mut u8;
+        if p.is_null() {
+            GlobalFree(h);
+            return Err("out of memory".into());
+        }
+        fill(std::slice::from_raw_parts_mut(p, len));
+        GlobalUnlock(h);
+        if SetClipboardData(format, h).is_null() {
+            GlobalFree(h);
+            return Err("could not put the image on the clipboard".into());
+        }
+        Ok(())
+    }
+
+    /// A BITMAPV5HEADER followed by bottom-up BGRA rows with straight alpha
+    /// (bottom-up because Word and WordPad cannot paste top-down DIBs).
+    pub fn dibv5(w: u32, h: u32, rgba: &[u8], out: &mut [u8]) {
+        const HEADER: usize = 124;
+        let put32 =
+            |o: &mut [u8], at: usize, v: u32| o[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        out[..HEADER].fill(0);
+        put32(out, 0, HEADER as u32);
+        put32(out, 4, w);
+        put32(out, 8, h); // positive: bottom-up
+        out[12..14].copy_from_slice(&1u16.to_le_bytes()); // planes
+        out[14..16].copy_from_slice(&32u16.to_le_bytes()); // bits
+        put32(out, 16, 3); // BI_BITFIELDS
+        put32(out, 20, w * h * 4);
+        put32(out, 40, 0x00FF_0000);
+        put32(out, 44, 0x0000_FF00);
+        put32(out, 48, 0x0000_00FF);
+        put32(out, 52, 0xFF00_0000);
+        put32(out, 56, 0x7352_4742); // LCS_sRGB
+        put32(out, 108, 4); // LCS_GM_IMAGES
+        let row = (w * 4) as usize;
+        for y in 0..h as usize {
+            let src = &rgba[y * row..(y + 1) * row];
+            let dst_y = h as usize - 1 - y;
+            let dst = &mut out[HEADER + dst_y * row..HEADER + (dst_y + 1) * row];
+            for (d, s) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                d.copy_from_slice(&[s[2], s[1], s[0], s[3]]);
+            }
+        }
+    }
+
+    /// Replace the clipboard with an image. Returns the clipboard's sequence
+    /// number afterwards, to recognize it later.
+    pub fn set_image(w: u32, h: u32, rgba: &[u8]) -> Result<u32, String> {
+        open()?;
+        let result = unsafe {
+            if EmptyClipboard() == 0 {
+                Err("could not clear the clipboard".to_string())
+            } else {
+                put(CF_DIBV5 as u32, 124 + rgba.len(), |b| dibv5(w, h, rgba, b))
+            }
+        };
+        let seq = unsafe { GetClipboardSequenceNumber() };
+        unsafe { CloseClipboard() };
+        result.map(|()| seq)
+    }
+
+    /// Add a PNG rendition to the clipboard, but only if it still holds the
+    /// image put there at `seq` (the user may have copied something else).
+    pub fn add_png(png: &[u8], seq: u32) -> bool {
+        if open().is_err() {
+            return false;
+        }
+        let ok = unsafe {
+            if GetClipboardSequenceNumber() != seq {
+                false
+            } else {
+                let name: Vec<u16> = "PNG\0".encode_utf16().collect();
+                let format = RegisterClipboardFormatW(name.as_ptr());
+                format != 0 && put(format, png.len(), |b| b.copy_from_slice(png)).is_ok()
+            }
+        };
+        unsafe { CloseClipboard() };
+        ok
+    }
+}
