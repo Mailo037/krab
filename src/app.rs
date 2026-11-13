@@ -298,8 +298,31 @@ fn draw_overlay(win: &mut OverlayWin) {
     let Ok(mut buf) = win.surface.buffer_mut() else {
         return;
     };
-    win.overlay.render(&mut buf, size.width, size.height);
-    let _ = buf.present();
+    // Age 1: the buffer still holds the frame presented last, so only what
+    // changed since has to be painted and handed to the window system.
+    let incremental = buf.age() == 1;
+    match win
+        .overlay
+        .render_frame(&mut buf, size.width, size.height, incremental)
+    {
+        Some(damage) => {
+            let rects: Vec<softbuffer::Rect> = damage
+                .iter()
+                .filter_map(|r| {
+                    Some(softbuffer::Rect {
+                        x: r.x as u32,
+                        y: r.y as u32,
+                        width: NonZeroU32::new(r.w as u32)?,
+                        height: NonZeroU32::new(r.h as u32)?,
+                    })
+                })
+                .collect();
+            let _ = buf.present_with_damage(&rects);
+        }
+        None => {
+            let _ = buf.present();
+        }
+    }
     if !win.presented {
         win.presented = true;
         trace::mark("overlay on screen");

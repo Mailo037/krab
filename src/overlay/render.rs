@@ -1,9 +1,9 @@
 //! Drawing the overlay: dimmed screenshot, selection, markup and toolbars.
 
 use super::layout::{Bar, Bars};
-use super::{edit_size, Btn, Drag, Kind, Mask, Mode, Overlay, Win};
+use super::{edit_size, Btn, Drag, Kind, Mode, Overlay, Win};
 use crate::annotate::{Annotation, Shape, Source, Tool};
-use crate::geom::{Pt, RectF, RectI};
+use crate::geom::{merge_rects, Pt, RectF, RectI};
 use crate::gfx::{icons, text, theme, Canvas, Color};
 use tiny_skia::{BlendMode, LineCap, LineJoin, PathBuilder, Stroke, StrokeDash, Transform};
 
@@ -30,6 +30,39 @@ fn mix(a: u32, b: u32, t: u32) -> u32 {
     let ch =
         |shift: u32| ((((a >> shift) & 0xFF) * inv + ((b >> shift) & 0xFF) * t) / 255) << shift;
     0xFF00_0000 | ch(16) | ch(8) | ch(0)
+}
+
+/// The parts of a frame that decide what the next frame must repaint.
+pub(super) struct PrevFrame {
+    size: (u32, u32),
+    bright: Option<RectI>,
+    masked: bool,
+    version: u64,
+    draft: Option<RectI>,
+    chrome: Vec<RectI>,
+}
+
+/// The selection with its finished markup, rendered once.
+pub(super) struct Layer {
+    rect: RectI,
+    version: u64,
+    px: Vec<u32>,
+}
+
+struct FrameInfo {
+    bars: Bars,
+    over_bar: bool,
+    full: RectI,
+    idle: bool,
+    dragging_rect: Option<RectI>,
+    hover_target: Option<RectI>,
+    sel_rect: Option<RectI>,
+    /// Shown undimmed.
+    bright: Option<RectI>,
+    /// A freeform mask shapes the bright area.
+    masked: bool,
+    /// Where the markup being drawn right now can paint.
+    draft_rect: Option<RectI>,
 }
 
 impl Overlay {
@@ -84,76 +117,17 @@ impl Overlay {
             .collect();
         self.w = w;
         self.h = h;
+        self.prev = None;
+        self.layer = None;
         self.clear_selection();
     }
 
-    /// Paint the screenshot: bright inside `bright`, dimmed everywhere else.
-    /// Annotations are drawn between those two steps so the dim pass clips
-    /// them to the selection for free.
-    fn base(&self, buf: &mut [u32], bright: Option<RectI>, annotate: bool, mask: Option<&Mask>) {
-        let (w, h) = (self.w as usize, self.h as usize);
-        let Some(r) = bright else {
-            for (d, s) in buf.chunks_exact_mut(w).zip(self.px.chunks_exact(w)) {
-                dim_row(d, s);
-            }
-            return;
-        };
-        let (x0, x1) = (r.x as usize, r.right() as usize);
-        let (y0, y1) = (r.y as usize, r.bottom() as usize);
-        for y in y0..y1 {
-            let o = y * w;
-            buf[o + x0..o + x1].copy_from_slice(&self.px[o + x0..o + x1]);
-        }
-        if annotate {
-            let src = Source {
-                px: &self.px,
-                w: self.w,
-                h: self.h,
-            };
-            let mut c = Canvas::new(buf, self.w, self.h);
-            for a in self.annotations.iter().chain(self.draft.iter()) {
-                a.draw(&mut c, &src, self.scale);
-            }
-        }
-        for y in 0..h {
-            let o = y * w;
-            if y < y0 || y >= y1 {
-                dim_row(&mut buf[o..o + w], &self.px[o..o + w]);
-            } else {
-                dim_row(&mut buf[o..o + x0], &self.px[o..o + x0]);
-                dim_row(&mut buf[o + x1..o + w], &self.px[o + x1..o + w]);
-            }
-        }
-        if let Some(m) = mask.filter(|m| m.rect == r) {
-            for (row, y) in (y0..y1).enumerate() {
-                let o = y * w + x0;
-                let mrow = &m.a[row * r.w as usize..(row + 1) * r.w as usize];
-                for (i, cov) in mrow.iter().enumerate() {
-                    if *cov != 255 {
-                        let d = dim(self.px[o + i]);
-                        buf[o + i] = if *cov == 0 {
-                            d
-                        } else {
-                            mix(d, buf[o + i], *cov as u32)
-                        };
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn render(&mut self, buf: &mut [u32], w: u32, h: u32) {
-        if w == 0 || h == 0 || buf.len() != (w * h) as usize {
-            return;
-        }
-        self.ensure_size(w, h);
-        let s = self.scale;
+    /// Everything the frame depends on, computed once per frame.
+    fn frame_info(&self) -> FrameInfo {
         let bars = self.bars();
         let over_bar = bars.contains(self.cursor);
-        let full = RectI::new(0, 0, w as i32, h as i32);
+        let full = RectI::new(0, 0, self.w as i32, self.h as i32);
         let idle = matches!(self.drag, Drag::None | Drag::Button(_));
-
-        // --- screenshot -----------------------------------------------------
         let dragging_rect = match self.drag {
             Drag::NewRect { start } => Some(
                 RectF::from_points(start, self.cursor)
@@ -177,20 +151,272 @@ impl Overlay {
             .or(dragging_rect)
             .or(hover_target)
             .filter(|r| !r.is_empty());
-        let mask = self.sel.as_ref().and_then(|sel| sel.mask.as_ref());
-        self.base(buf, bright, self.sel.is_some(), mask);
+        let masked = bright.is_some()
+            && self
+                .sel
+                .as_ref()
+                .and_then(|s| s.mask.as_ref())
+                .is_some_and(|m| Some(m.rect) == bright);
+        let draft_rect = match (&self.draft, bright) {
+            (Some(d), Some(b)) => {
+                let r = d
+                    .bounds()
+                    .inflate(d.width * 2.0 + 12.0 * self.scale)
+                    .round_out()
+                    .intersect(&b);
+                (!r.is_empty()).then_some(r)
+            }
+            _ => None,
+        };
+        FrameInfo {
+            bars,
+            over_bar,
+            full,
+            idle,
+            dragging_rect,
+            hover_target,
+            sel_rect,
+            bright,
+            masked,
+            draft_rect,
+        }
+    }
 
-        let mut c = Canvas::new(buf, w, h);
+    /// Keep the selection with its finished markup rendered in one buffer,
+    /// so frames copy it instead of redrawing every annotation.
+    fn update_layer(&mut self, f: &FrameInfo) {
+        let rect = match (self.sel.is_some(), f.bright) {
+            (true, Some(b)) if !self.annotations.is_empty() => b,
+            _ => {
+                self.layer = None;
+                return;
+            }
+        };
+        if self
+            .layer
+            .as_ref()
+            .is_some_and(|l| l.rect == rect && l.version == self.ann_version)
+        {
+            return;
+        }
+        let mut px = self.layer.take().map(|l| l.px).unwrap_or_default();
+        px.clear();
+        px.reserve((rect.w * rect.h) as usize);
+        let w = self.w as usize;
+        for y in rect.y..rect.bottom() {
+            let o = y as usize * w;
+            px.extend_from_slice(&self.px[o + rect.x as usize..o + rect.right() as usize]);
+        }
+        {
+            let src = Source {
+                px: &self.px,
+                w: self.w,
+                h: self.h,
+            };
+            let mut c = Canvas::new(&mut px, rect.w as u32, rect.h as u32)
+                .with_offset(-rect.x as f32, -rect.y as f32);
+            for a in &self.annotations {
+                a.draw(&mut c, &src, self.scale);
+            }
+        }
+        self.layer = Some(Layer {
+            rect,
+            version: self.ann_version,
+            px,
+        });
+    }
+
+    /// Paint the screenshot part of the frame (bright inside the selection,
+    /// dimmed elsewhere, markup on top) for `region` into `dst`, whose first
+    /// pixel is the region's top-left corner and whose rows are `stride`
+    /// pixels apart.
+    fn paint_base(&self, dst: &mut [u32], stride: usize, region: RectI, f: &FrameInfo) {
+        let w = self.w as usize;
+        let at = |y: i32, x: i32| (y - region.y) as usize * stride + (x - region.x) as usize;
+        let inside = f
+            .bright
+            .map(|b| b.intersect(&region))
+            .filter(|b| !b.is_empty());
+        if let Some(b) = inside {
+            let layer = self.layer.as_ref().filter(|l| Some(l.rect) == f.bright);
+            let n = b.w as usize;
+            for y in b.y..b.bottom() {
+                let d = at(y, b.x);
+                match layer {
+                    Some(l) => {
+                        let o =
+                            (y - l.rect.y) as usize * l.rect.w as usize + (b.x - l.rect.x) as usize;
+                        dst[d..d + n].copy_from_slice(&l.px[o..o + n]);
+                    }
+                    None => {
+                        let o = y as usize * w + b.x as usize;
+                        dst[d..d + n].copy_from_slice(&self.px[o..o + n]);
+                    }
+                }
+            }
+            if let (Some(draft), Some(dr)) = (&self.draft, f.draft_rect) {
+                if !dr.intersect(&region).is_empty() {
+                    let src = Source {
+                        px: &self.px,
+                        w: self.w,
+                        h: self.h,
+                    };
+                    let rows = region.h as usize;
+                    let mut c = Canvas::new(&mut dst[..stride * rows], stride as u32, rows as u32)
+                        .with_offset(-region.x as f32, -region.y as f32);
+                    draft.draw(&mut c, &src, self.scale);
+                }
+            }
+        }
+        // Dim everything outside the bright rect; this also clips the draft.
+        let (x0, x1) = (region.x, region.right());
+        for y in region.y..region.bottom() {
+            let s = y as usize * w;
+            let d = at(y, x0);
+            let mut dim_span = |a: i32, b: i32| {
+                if a < b {
+                    let n = (b - a) as usize;
+                    let (da, sa) = (d + (a - x0) as usize, s + a as usize);
+                    dim_row(&mut dst[da..da + n], &self.px[sa..sa + n]);
+                }
+            };
+            match f.bright {
+                Some(b) if y >= b.y && y < b.bottom() => {
+                    dim_span(x0, b.x.clamp(x0, x1));
+                    dim_span(b.right().clamp(x0, x1), x1);
+                }
+                _ => dim_span(x0, x1),
+            }
+        }
+        if f.masked {
+            if let Some(m) = self.sel.as_ref().and_then(|s| s.mask.as_ref()) {
+                let r = m.rect.intersect(&region);
+                for y in r.y..r.bottom() {
+                    let mrow = (y - m.rect.y) as usize * m.rect.w as usize;
+                    for x in r.x..r.right() {
+                        let cov = m.a[mrow + (x - m.rect.x) as usize];
+                        if cov != 255 {
+                            let dimmed = dim(self.px[y as usize * w + x as usize]);
+                            let px = &mut dst[at(y, x)];
+                            *px = if cov == 0 {
+                                dimmed
+                            } else {
+                                mix(dimmed, *px, cov as u32)
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Render the whole frame into `buf`.
+    pub fn render(&mut self, buf: &mut [u32], w: u32, h: u32) {
+        self.render_frame(buf, w, h, false);
+    }
+
+    /// Render a frame. With `incremental`, `buf` must still hold the frame
+    /// this overlay rendered last; only what changed since is repainted and
+    /// the changed rects are returned (to present just those). `None` means
+    /// the whole buffer was repainted.
+    pub fn render_frame(
+        &mut self,
+        buf: &mut [u32],
+        w: u32,
+        h: u32,
+        incremental: bool,
+    ) -> Option<Vec<RectI>> {
+        if w == 0 || h == 0 || buf.len() != (w * h) as usize {
+            return None;
+        }
+        self.ensure_size(w, h);
+        let f = self.frame_info();
+        self.update_layer(&f);
+
+        // Where the toolbars, loupe, labels and menu land this frame.
+        let mut chrome = Vec::new();
+        self.draw_chrome(&mut Canvas::measure(w, h, &mut chrome), &f);
+        let chrome = merge_rects(&chrome, f.full, 48);
+
+        let prev = self.prev.take().filter(|p| incremental && p.size == (w, h));
+        let damage = prev.map(|p| {
+            let mut d: Vec<RectI> = Vec::new();
+            d.extend(&p.chrome);
+            d.extend(&chrome);
+            if p.version != self.ann_version {
+                d.extend(p.bright);
+                d.extend(f.bright);
+            } else if p.bright != f.bright || p.masked != f.masked {
+                match (p.bright, f.bright) {
+                    // The overlap of both looks the same in both frames.
+                    (Some(a), Some(b)) if !p.masked && !f.masked => {
+                        d.extend(a.subtract(&b));
+                        d.extend(b.subtract(&a));
+                    }
+                    (a, b) => {
+                        d.extend(a);
+                        d.extend(b);
+                    }
+                }
+            }
+            d.extend(p.draft);
+            d.extend(f.draft_rect);
+            merge_rects(&d, f.full, 12)
+        });
+
+        match &damage {
+            None => self.paint_base(buf, w as usize, f.full, &f),
+            Some(rects) => {
+                let mut tmp = std::mem::take(&mut self.scratch);
+                for r in rects {
+                    let n = (r.w * r.h) as usize;
+                    tmp.clear();
+                    tmp.resize(n, 0);
+                    self.paint_base(&mut tmp, r.w as usize, *r, &f);
+                    for (i, y) in (r.y..r.bottom()).enumerate() {
+                        let o = y as usize * w as usize + r.x as usize;
+                        let rw = r.w as usize;
+                        buf[o..o + rw].copy_from_slice(&tmp[i * rw..(i + 1) * rw]);
+                    }
+                }
+                self.scratch = tmp;
+            }
+        }
+        // Every chrome pixel lies inside the damage, which was just
+        // restored to the plain screenshot, so drawing it over is exact.
+        self.draw_chrome(&mut Canvas::new(buf, w, h), &f);
+        self.prev = Some(PrevFrame {
+            size: (w, h),
+            bright: f.bright,
+            masked: f.masked,
+            version: self.ann_version,
+            draft: f.draft_rect,
+            chrome,
+        });
+        damage
+    }
+
+    /// Selection outlines, toolbars, loupe, labels and menus: everything
+    /// drawn on top of the screenshot.
+    fn draw_chrome(&self, c: &mut Canvas, f: &FrameInfo) {
+        let s = self.scale;
+        let bars = &f.bars;
+        let (sel_rect, dragging_rect) = (f.sel_rect, f.dragging_rect);
+        let mask = self.sel.as_ref().and_then(|sel| sel.mask.as_ref());
+        let idle = f.idle;
 
         // --- selection chrome -----------------------------------------------
-        if let Some(r) = hover_target.filter(|_| sel_rect.is_none() && dragging_rect.is_none()) {
+        if let Some(r) = f
+            .hover_target
+            .filter(|_| sel_rect.is_none() && dragging_rect.is_none())
+        {
             let inset = r.to_f().inflate(-s);
             c.stroke_rrect(inset, 0.0, 2.0 * s, theme::ACCENT);
         }
         if let Some(r) = sel_rect.or(dragging_rect).filter(|r| !r.is_empty()) {
             let rf = r.to_f();
             match mask {
-                Some(m) => self.draw_lasso(&mut c, &m.poly, true),
+                Some(m) => self.draw_lasso(c, &m.poly, true),
                 None => {
                     c.stroke_rrect(rf.inflate(0.5 * s), 0.0, 1.0 * s, Color::rgba(0, 0, 0, 90));
                     c.stroke_rrect(rf.inflate(0.75 * s), 0.0, 1.5 * s, theme::ACCENT);
@@ -202,12 +428,11 @@ impl Overlay {
                     c.fill_circle(hp, 3.0 * s, Color::WHITE);
                 }
             }
-            self.draw_size_label(&mut c, rf, bars.above);
+            self.draw_size_label(c, rf, bars.above);
         }
         if let Drag::Lasso { pts } = &self.drag {
-            self.draw_lasso(&mut c, pts, false);
+            self.draw_lasso(c, pts, false);
         }
-
         // --- text being typed -------------------------------------------------
         if let Some(edit) = &self.text_edit {
             let em = self.text_em();
@@ -226,7 +451,7 @@ impl Overlay {
                 color: self.color,
                 width: 0.0,
             }
-            .draw(&mut c, &src, s);
+            .draw(c, &src, s);
             let frame = RectF::new(
                 edit.pos.x - 5.0 * s,
                 edit.pos.y - 3.0 * s,
@@ -264,11 +489,11 @@ impl Overlay {
 
         // --- toolbars ---------------------------------------------------------
         for bar in bars.iter() {
-            self.draw_bar(&mut c, bar);
+            self.draw_bar(c, bar);
         }
         if idle && self.menu.is_none() {
             if let Some(btn) = self.hover_btn {
-                self.draw_tooltip(&mut c, &bars, btn);
+                self.draw_tooltip(c, bars, btn);
             }
         }
 
@@ -283,11 +508,11 @@ impl Overlay {
             && matches!(self.drag, Drag::None | Drag::NewRect { .. });
         let resizing = matches!(self.drag, Drag::Resize { .. });
         if self.cursor_inside
-            && !over_bar
+            && !f.over_bar
             && self.menu.is_none()
             && (picking || resizing || (selecting && self.opts.loupe))
         {
-            self.draw_loupe(&mut c);
+            self.draw_loupe(c);
         }
         if self.sel.is_none() && matches!(self.drag, Drag::None) {
             let hint = match (self.ui.kind, self.ui.mode) {
@@ -300,16 +525,16 @@ impl Overlay {
                 (_, Mode::Fullscreen) => "Click to capture this screen",
             };
             self.draw_pill(
-                &mut c,
+                c,
                 &format!("{hint}   \u{00B7}   Esc to cancel"),
                 self.h as f32 - 64.0 * s,
                 false,
             );
         }
         if let Some((msg, _)) = &self.flash {
-            self.draw_pill(&mut c, msg, 70.0 * s, true);
+            self.draw_pill(c, msg, 70.0 * s, true);
         }
-        self.draw_menu(&mut c);
+        self.draw_menu(c);
     }
 
     fn draw_lasso(&self, c: &mut Canvas, pts: &[Pt], closed: bool) {

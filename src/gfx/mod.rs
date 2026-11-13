@@ -11,6 +11,8 @@ pub mod text;
 pub mod theme;
 
 use crate::geom::{Pt, RectF, RectI};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use tiny_skia::{
     BlendMode, FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, PixmapMut, Rect, Stroke,
     Transform,
@@ -75,6 +77,9 @@ pub struct Canvas<'a> {
     /// Translation applied to everything drawn (used when rendering a crop).
     pub ox: f32,
     pub oy: f32,
+    /// Measuring canvas: nothing is painted, every primitive only records
+    /// the device pixels it would touch (used to find what must be redrawn).
+    rec: Option<&'a mut Vec<RectI>>,
 }
 
 impl<'a> Canvas<'a> {
@@ -86,7 +91,109 @@ impl<'a> Canvas<'a> {
             h,
             ox: 0.0,
             oy: 0.0,
+            rec: None,
         }
+    }
+
+    /// A canvas of size `w` x `h` that records, instead of painting, a
+    /// conservative bounding rect of everything drawn on it into `rec`.
+    pub fn measure(w: u32, h: u32, rec: &'a mut Vec<RectI>) -> Self {
+        Self {
+            buf: &mut [],
+            w,
+            h,
+            ox: 0.0,
+            oy: 0.0,
+            rec: Some(rec),
+        }
+    }
+
+    pub fn is_measuring(&self) -> bool {
+        self.rec.is_some()
+    }
+
+    /// Record device pixels (already offset). Returns true when measuring.
+    pub(crate) fn record_px(&mut self, r: RectI) -> bool {
+        match &mut self.rec {
+            Some(rec) => {
+                let r = r.intersect(&RectI::new(0, 0, self.w as i32, self.h as i32));
+                if !r.is_empty() {
+                    rec.push(r);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record a canvas-space rect (before the offset), padded for
+    /// anti-aliasing. Returns true when measuring.
+    fn record(&mut self, r: RectF, pad: f32) -> bool {
+        if self.rec.is_none() {
+            return false;
+        }
+        let r = RectF::new(r.x + self.ox, r.y + self.oy, r.w, r.h).inflate(pad + 1.5);
+        self.record_px(r.round_out())
+    }
+
+    /// Record the device-space footprint of `path` under `ts` (which
+    /// already includes the offset), grown by `pad` on every side. Long
+    /// strokes are recorded segment by segment, so the outline of a large
+    /// rectangle does not mark its whole inside as changed.
+    fn record_path(&mut self, path: &Path, ts: Transform, pad: f32, segmentwise: bool) -> bool {
+        if self.rec.is_none() {
+            return false;
+        }
+        let map = |x: f32, y: f32| (ts.sx * x + ts.kx * y + ts.tx, ts.ky * x + ts.sy * y + ts.ty);
+        let bounds_of = |pts: &[(f32, f32)]| {
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for &(x, y) in pts {
+                let (x, y) = map(x, y);
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+            RectF::new(x0, y0, x1 - x0, y1 - y0)
+                .inflate(pad + 1.5)
+                .round_out()
+        };
+        let b = path.bounds();
+        let whole = bounds_of(&[
+            (b.left(), b.top()),
+            (b.right(), b.top()),
+            (b.left(), b.bottom()),
+            (b.right(), b.bottom()),
+        ]);
+        if !segmentwise || whole.w.min(whole.h) < 96 {
+            return self.record_px(whole);
+        }
+        use tiny_skia::PathSegment;
+        let mut last = (0.0, 0.0);
+        let mut start = (0.0, 0.0);
+        for seg in path.segments() {
+            let r = match seg {
+                PathSegment::MoveTo(p) => {
+                    last = (p.x, p.y);
+                    start = last;
+                    continue;
+                }
+                PathSegment::LineTo(p) => bounds_of(&[last, (p.x, p.y)]),
+                PathSegment::QuadTo(c, p) => bounds_of(&[last, (c.x, c.y), (p.x, p.y)]),
+                PathSegment::CubicTo(c1, c2, p) => {
+                    bounds_of(&[last, (c1.x, c1.y), (c2.x, c2.y), (p.x, p.y)])
+                }
+                PathSegment::Close => bounds_of(&[last, start]),
+            };
+            last = match seg {
+                PathSegment::LineTo(p)
+                | PathSegment::QuadTo(_, p)
+                | PathSegment::CubicTo(_, _, p) => (p.x, p.y),
+                _ => start,
+            };
+            self.record_px(r);
+        }
+        true
     }
 
     pub fn with_offset(mut self, ox: f32, oy: f32) -> Self {
@@ -117,6 +224,9 @@ impl<'a> Canvas<'a> {
 
     pub fn fill_path_ex(&mut self, path: &Path, c: Color, rule: FillRule, extra: Transform) {
         let ts = extra.post_concat(self.ts());
+        if self.record_path(path, ts, 0.0, false) {
+            return;
+        }
         let paint = Self::paint(c);
         if let Some(mut pm) = self.pixmap() {
             pm.fill_path(path, &paint, rule, ts, None);
@@ -149,6 +259,10 @@ impl<'a> Canvas<'a> {
         extra: Transform,
     ) {
         let ts = extra.post_concat(self.ts());
+        let k = (ts.sx.abs() + ts.kx.abs()).max(ts.ky.abs() + ts.sy.abs());
+        if self.record_path(path, ts, stroke.width * k * 0.5 + 1.0, true) {
+            return;
+        }
         let mut paint = Self::paint(c);
         paint.blend_mode = blend;
         if let Some(mut pm) = self.pixmap() {
@@ -158,6 +272,9 @@ impl<'a> Canvas<'a> {
 
     /// Fill with a two-stop linear gradient running from `a` to `b`.
     pub fn fill_path_gradient(&mut self, path: &Path, a: Pt, ca: Color, b: Pt, cb: Color) {
+        if self.record_path(path, self.ts(), 0.0, false) {
+            return;
+        }
         let stop = |t: f32, c: Color| {
             tiny_skia::GradientStop::new(t, tiny_skia::Color::from_rgba8(c.b, c.g, c.r, c.a))
         };
@@ -190,6 +307,9 @@ impl<'a> Canvas<'a> {
         inner: Color,
         outer: Color,
     ) {
+        if self.record_path(path, self.ts(), 0.0, false) {
+            return;
+        }
         let stop = |t: f32, c: Color| {
             tiny_skia::GradientStop::new(t, tiny_skia::Color::from_rgba8(c.b, c.g, c.r, c.a))
         };
@@ -217,6 +337,9 @@ impl<'a> Canvas<'a> {
 
     /// Draw another `0xAARRGGBB` buffer scaled into `dst` with rounded corners.
     pub fn draw_image(&mut self, px: &[u32], iw: u32, ih: u32, dst: RectF, radius: f32) {
+        if self.record(dst, 0.0) {
+            return;
+        }
         let Some(src) = tiny_skia::PixmapRef::from_bytes(bytemuck::cast_slice(px), iw, ih) else {
             return;
         };
@@ -243,7 +366,7 @@ impl<'a> Canvas<'a> {
     }
 
     pub fn fill_rect(&mut self, r: RectF, c: Color) {
-        if r.is_empty() {
+        if r.is_empty() || self.record(r, 0.0) {
             return;
         }
         if c.a == 255 {
@@ -264,7 +387,7 @@ impl<'a> Canvas<'a> {
     /// Fill device pixels directly (no offset, no blending).
     pub fn fill_rect_px(&mut self, r: RectI, px: u32) {
         let r = r.intersect(&RectI::new(0, 0, self.w as i32, self.h as i32));
-        if r.is_empty() {
+        if r.is_empty() || self.record_px(r) {
             return;
         }
         let w = self.w as usize;
@@ -307,26 +430,62 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    /// Soft drop shadow approximated with a few stacked translucent shapes.
+    /// Soft drop shadow approximated with many stacked translucent shapes.
+    ///
+    /// The layers are rendered once per size into a cached alpha sprite, so
+    /// a shadow costs a single blend pass per frame instead of 24 path fills
+    /// (which made the toolbars the most expensive part of a 4K frame).
     pub fn shadow(&mut self, r: RectF, radius: f32, spread: f32, strength: f32) {
-        // Many faint layers: each one is below the threshold where a band
-        // would be visible, together they fall off smoothly.
-        const STEPS: usize = 24;
-        for i in 0..STEPS {
-            let t = (i as f32 + 0.5) / STEPS as f32;
-            let d = spread * t;
-            let rr = RectF::new(
-                r.x - d,
-                r.y - d + spread * 0.3,
-                r.w + 2.0 * d,
-                r.h + 2.0 * d,
-            );
-            let a = strength * 0.075 * (1.0 - t).powf(1.5);
-            self.fill_rrect(
-                rr,
-                radius + d,
-                Color::rgba(0, 0, 0, (a * 255.0).round().min(255.0) as u8),
-            );
+        if r.is_empty() {
+            return;
+        }
+        let outer = RectF::new(
+            r.x - spread,
+            r.y - spread + spread * 0.3,
+            r.w + 2.0 * spread,
+            r.h + 2.0 * spread,
+        );
+        if self.record(outer, 1.0) {
+            return;
+        }
+        // Whole device pixels go into the blit position; the fraction is
+        // part of the sprite, so positions stay sub-pixel exact.
+        let (dx, dy) = (r.x + self.ox, r.y + self.oy);
+        let (ix, iy) = (dx.floor(), dy.floor());
+        let sprite = shadow_sprite(
+            RectF::new(dx - ix, dy - iy, r.w, r.h),
+            radius,
+            spread,
+            strength,
+        );
+        let (cw, ch) = (self.w as i32, self.h as i32);
+        let (x0, y0) = (ix as i32 + sprite.x, iy as i32 + sprite.y);
+        for row in 0..sprite.h {
+            let y = y0 + row;
+            if y < 0 || y >= ch {
+                continue;
+            }
+            let xa = x0.max(0);
+            let xb = (x0 + sprite.w).min(cw);
+            if xa >= xb {
+                continue;
+            }
+            let src =
+                &sprite.a[(row * sprite.w + xa - x0) as usize..(row * sprite.w + xb - x0) as usize];
+            let dst = &mut self.buf[(y * cw + xa) as usize..(y * cw + xb) as usize];
+            for (d, &a) in dst.iter_mut().zip(src) {
+                if a == 0 {
+                    continue;
+                }
+                // Premultiplied black over the destination.
+                let inv = 255 - a as u32;
+                let ch = |shift: u32| (((*d >> shift) & 0xFF) * inv + 127) / 255;
+                let da = (*d >> 24) & 0xFF;
+                *d = (a as u32 + (da * inv + 127) / 255).min(255) << 24
+                    | ch(16) << 16
+                    | ch(8) << 8
+                    | ch(0);
+            }
         }
     }
 
@@ -342,6 +501,9 @@ impl<'a> Canvas<'a> {
         let block = block.max(2);
         let r = r.intersect(&RectI::new(0, 0, sw as i32, sh as i32));
         if r.is_empty() {
+            return;
+        }
+        if self.record(r.to_f(), 0.0) {
             return;
         }
         let (ox, oy) = (self.ox.round() as i32, self.oy.round() as i32);
@@ -375,7 +537,7 @@ impl<'a> Canvas<'a> {
 
     /// Draw an opaque RGBA image scaled to fit `dst` (box-sampled, for thumbnails).
     pub fn blit_rgba_fit(&mut self, rgba: &[u8], iw: u32, ih: u32, dst: RectF) {
-        if iw == 0 || ih == 0 || dst.is_empty() {
+        if iw == 0 || ih == 0 || dst.is_empty() || self.record(dst, 0.0) {
             return;
         }
         let scale = (dst.w / iw as f32).min(dst.h / ih as f32);
@@ -424,6 +586,83 @@ impl<'a> Canvas<'a> {
             }
         }
     }
+}
+
+/// A pre-rendered shadow: coverage of the stacked layers, relative to the
+/// whole-pixel position of the shadowed rect.
+struct ShadowSprite {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    a: Vec<u8>,
+}
+
+/// The shadow for `r` (whose position only carries the sub-pixel fraction),
+/// rendered on first use and cached by size.
+fn shadow_sprite(r: RectF, radius: f32, spread: f32, strength: f32) -> Arc<ShadowSprite> {
+    type Key = [i32; 7];
+    static CACHE: OnceLock<Mutex<HashMap<Key, Arc<ShadowSprite>>>> = OnceLock::new();
+    let q = |v: f32| (v * 16.0).round() as i32;
+    let key = [
+        q(r.x),
+        q(r.y),
+        q(r.w),
+        q(r.h),
+        q(radius),
+        q(spread),
+        q(strength * 100.0),
+    ];
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(s) = cache.lock().unwrap().get(&key) {
+        return s.clone();
+    }
+    let outer = RectF::new(
+        r.x - spread,
+        r.y - spread + spread * 0.3,
+        r.w + 2.0 * spread,
+        r.h + 2.0 * spread,
+    )
+    .inflate(2.0)
+    .round_out();
+    let mut px = vec![0u32; (outer.w.max(1) * outer.h.max(1)) as usize];
+    {
+        let mut c = Canvas::new(&mut px, outer.w.max(1) as u32, outer.h.max(1) as u32)
+            .with_offset(-outer.x as f32, -outer.y as f32);
+        // Many faint layers: each one is below the threshold where a band
+        // would be visible, together they fall off smoothly.
+        const STEPS: usize = 24;
+        for i in 0..STEPS {
+            let t = (i as f32 + 0.5) / STEPS as f32;
+            let d = spread * t;
+            let rr = RectF::new(
+                r.x - d,
+                r.y - d + spread * 0.3,
+                r.w + 2.0 * d,
+                r.h + 2.0 * d,
+            );
+            let a = strength * 0.075 * (1.0 - t).powf(1.5);
+            c.fill_rrect(
+                rr,
+                radius + d,
+                Color::rgba(0, 0, 0, (a * 255.0).round().min(255.0) as u8),
+            );
+        }
+    }
+    let sprite = Arc::new(ShadowSprite {
+        x: outer.x,
+        y: outer.y,
+        w: outer.w.max(1),
+        h: outer.h.max(1),
+        a: px.iter().map(|p| (p >> 24) as u8).collect(),
+    });
+    let mut map = cache.lock().unwrap();
+    // Tooltips and toasts come in many sizes; keep the cache small.
+    if map.len() >= 96 {
+        map.clear();
+    }
+    map.insert(key, sprite.clone());
+    sprite
 }
 
 /// Rounded rectangle path (cubic corner approximation).

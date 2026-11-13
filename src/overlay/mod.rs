@@ -283,6 +283,15 @@ pub struct Overlay {
     menu: Option<menu::Menu>,
     /// The press that closed the menu must not also start a selection.
     swallow_release: bool,
+
+    /// Bumped whenever `annotations` changes.
+    ann_version: u64,
+    /// The selection with its finished markup, rendered once.
+    layer: Option<render::Layer>,
+    /// What the last frame showed, to repaint only what changed.
+    prev: Option<render::PrevFrame>,
+    /// Reused buffer for partial repaints.
+    scratch: Vec<u32>,
 }
 
 const FLASH_TIME: Duration = Duration::from_millis(1500);
@@ -352,6 +361,10 @@ impl Overlay {
             started_selection: false,
             menu: None,
             swallow_release: false,
+            ann_version: 0,
+            layer: None,
+            prev: None,
+            scratch: Vec::new(),
         }
     }
 
@@ -439,6 +452,7 @@ impl Overlay {
         self.restore_patch();
         self.sel = None;
         self.annotations.clear();
+        self.ann_version += 1;
         self.undo.clear();
         self.redo.clear();
         self.nudging = false;
@@ -471,6 +485,7 @@ impl Overlay {
             self.isolate(win);
         }
         self.annotations.clear();
+        self.ann_version += 1;
         self.undo.clear();
         self.redo.clear();
         self.nudging = false;
@@ -628,6 +643,14 @@ impl Overlay {
             }
         }
         self.patch = Some((r, saved));
+        self.screenshot_changed();
+    }
+
+    /// `px` was changed in place: what earlier frames showed of it is stale.
+    fn screenshot_changed(&mut self) {
+        self.layer = None;
+        self.prev = None;
+        self.dirty = true;
     }
 
     /// Put back the screen pixels `isolate` replaced.
@@ -640,7 +663,7 @@ impl Overlay {
             let row = y as usize * self.w as usize + r.x as usize;
             self.px[row..row + w].copy_from_slice(&saved[i * w..(i + 1) * w]);
         }
-        self.dirty = true;
+        self.screenshot_changed();
     }
 
     // ---- history -----------------------------------------------------------
@@ -654,6 +677,7 @@ impl Overlay {
 
     fn restore(&mut self, snap: Snapshot) {
         self.annotations = snap.annotations;
+        self.ann_version += 1;
         if let (Some(rect), Some(sel)) = (snap.rect, &mut self.sel) {
             sel.rect = rect;
         }
@@ -670,6 +694,8 @@ impl Overlay {
         self.undo.push(snap);
         self.redo.clear();
         self.nudging = false;
+        // Every change to the markup is preceded by a checkpoint.
+        self.ann_version += 1;
     }
 
     pub fn undo(&mut self) {
@@ -1134,6 +1160,7 @@ impl Overlay {
                 }
             }
             self.annotations.remove(i);
+            self.ann_version += 1;
         }
     }
 

@@ -162,6 +162,9 @@ impl Face {
 }
 
 fn blend_glyph(c: &mut Canvas, bmp: &Bitmap, x0: i32, y0: i32, color: Color) {
+    if c.record_px(crate::geom::RectI::new(x0, y0, bmp.w as i32, bmp.h as i32)) {
+        return;
+    }
     let (cw, ch) = (c.w as i32, c.h as i32);
     let (sr, sg, sb, sa) = (
         color.r as u32,

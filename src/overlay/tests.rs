@@ -849,3 +849,279 @@ fn a_temporary_size_mismatch_does_not_degrade_the_capture() {
     assert_eq!(pixel(&img, 0, 0), [0, 100, 80, 255]);
     assert_eq!(pixel(&img, 119, 89), [0, 219, 169, 255]);
 }
+
+/// Renders every step twice - incrementally into a buffer that keeps the
+/// previous frame, and from scratch - and requires identical pixels.
+struct FrameCheck {
+    inc: Vec<u32>,
+    full: Vec<u32>,
+    frames: usize,
+    partial: usize,
+}
+
+impl FrameCheck {
+    fn new(o: &mut Overlay) -> Self {
+        let mut inc = vec![0u32; (W * H) as usize];
+        o.render(&mut inc, W, H);
+        Self {
+            inc,
+            full: vec![0u32; (W * H) as usize],
+            frames: 0,
+            partial: 0,
+        }
+    }
+
+    fn step(&mut self, o: &mut Overlay, what: &str) {
+        let damage = o.render_frame(&mut self.inc, W, H, true);
+        self.frames += 1;
+        if let Some(d) = &damage {
+            let area: i64 = d.iter().map(|r| r.area()).sum();
+            if area < (W * H) as i64 / 2 {
+                self.partial += 1;
+            }
+        }
+        self.full.fill(0);
+        o.render(&mut self.full, W, H);
+        if let Some(i) = self.inc.iter().zip(&self.full).position(|(a, b)| a != b) {
+            panic!(
+                "{what}: incremental frame differs at ({}, {}): {:08X} vs {:08X}",
+                i as u32 % W,
+                i as u32 / W,
+                self.inc[i],
+                self.full[i]
+            );
+        }
+    }
+
+    fn moves(&mut self, o: &mut Overlay, from: (f32, f32), to: (f32, f32), what: &str) {
+        for i in 1..=6 {
+            let t = i as f32 / 6.0;
+            o.pointer_moved(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+            self.step(o, what);
+        }
+    }
+
+    fn drag(&mut self, o: &mut Overlay, from: (f32, f32), to: (f32, f32), what: &str) {
+        o.pointer_moved(from.0, from.1);
+        o.pointer_button(Button::Left, true);
+        self.step(o, what);
+        self.moves(o, from, to, what);
+        o.pointer_button(Button::Left, false);
+        self.step(o, what);
+    }
+}
+
+#[test]
+fn incremental_frames_match_full_repaints() {
+    let mut o = overlay(Mode::Rect);
+    let mut fc = FrameCheck::new(&mut o);
+    fc.moves(
+        &mut o,
+        (10.0, 10.0),
+        (600.0, 400.0),
+        "loupe follows the pointer",
+    );
+    fc.drag(
+        &mut o,
+        (100.0, 120.0),
+        (520.0, 430.0),
+        "dragging a selection",
+    );
+    fc.moves(
+        &mut o,
+        (300.0, 300.0),
+        (540.0, 470.0),
+        "hovering the toolbar",
+    );
+    o.activate(Btn::Tool(Tool::Pen));
+    fc.step(&mut o, "pen selected");
+    fc.drag(
+        &mut o,
+        (150.0, 150.0),
+        (60.0, 90.0),
+        "pen stroke leaving the selection",
+    );
+    o.activate(Btn::Tool(Tool::Arrow));
+    fc.drag(&mut o, (200.0, 300.0), (400.0, 200.0), "arrow");
+    o.activate(Btn::Tool(Tool::Pixelate));
+    fc.drag(&mut o, (300.0, 320.0), (380.0, 400.0), "pixelate");
+    o.undo();
+    fc.step(&mut o, "undo");
+    o.redo();
+    fc.step(&mut o, "redo");
+    o.activate(Btn::Tool(Tool::Text));
+    click(&mut o, (250.0, 250.0));
+    o.text_input("Krab");
+    fc.step(&mut o, "typing");
+    o.key(Key::Enter);
+    fc.step(&mut o, "text committed");
+    o.activate(Btn::Tool(Tool::Select));
+    fc.drag(
+        &mut o,
+        (300.0, 300.0),
+        (360.0, 330.0),
+        "moving the selection",
+    );
+    fc.drag(
+        &mut o,
+        (580.0, 460.0),
+        (640.0, 500.0),
+        "resizing the selection",
+    );
+    o.pointer_moved(320.0, 300.0);
+    o.pointer_button(Button::Right, true);
+    o.pointer_button(Button::Right, false);
+    fc.step(&mut o, "menu open");
+    fc.moves(&mut o, (330.0, 310.0), (360.0, 380.0), "hovering the menu");
+    o.key(Key::Escape);
+    fc.step(&mut o, "menu closed");
+    o.activate(Btn::Tool(Tool::Pipette));
+    fc.moves(&mut o, (300.0, 300.0), (310.0, 320.0), "pipette loupe");
+    click(&mut o, (310.0, 320.0));
+    fc.step(&mut o, "colour flash");
+    o.key(Key::Escape);
+    fc.step(&mut o, "selection cleared");
+    o.pointer_left();
+    fc.step(&mut o, "pointer left");
+    assert!(
+        fc.partial * 2 > fc.frames,
+        "most frames should repaint only a part ({} of {})",
+        fc.partial,
+        fc.frames
+    );
+
+    // Window mode: the highlight jumps between windows.
+    let wins = [
+        WinInfo {
+            rect: RectI::new(100, 80, 220, 190),
+            title: "a".into(),
+            id: 11,
+        },
+        WinInfo {
+            rect: RectI::new(400, 300, 300, 200),
+            title: "b".into(),
+            id: 12,
+        },
+    ];
+    let mut o = Overlay::new(
+        shot(),
+        &wins,
+        Options::default(),
+        Shared {
+            mode: Mode::Window,
+            kind: Kind::Snip,
+            delay: 3,
+        },
+    );
+    let mut fc = FrameCheck::new(&mut o);
+    fc.moves(&mut o, (150.0, 150.0), (500.0, 400.0), "window hover");
+    fc.moves(&mut o, (500.0, 400.0), (900.0, 700.0), "off the windows");
+
+    // Freeform selection with markup under a mask.
+    let mut o = overlay(Mode::Freeform);
+    let mut fc = FrameCheck::new(&mut o);
+    o.pointer_moved(200.0, 200.0);
+    o.pointer_button(Button::Left, true);
+    for (x, y) in [
+        (400.0, 210.0),
+        (420.0, 400.0),
+        (210.0, 420.0),
+        (190.0, 300.0),
+    ] {
+        o.pointer_moved(x, y);
+        fc.step(&mut o, "lasso");
+    }
+    o.pointer_button(Button::Left, false);
+    fc.step(&mut o, "lasso closed");
+    o.activate(Btn::Tool(Tool::Highlighter));
+    fc.drag(
+        &mut o,
+        (220.0, 300.0),
+        (430.0, 310.0),
+        "highlighter under a mask",
+    );
+}
+
+/// `cargo test --release --lib render_timing -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn render_timing() {
+    let (w, h) = (3840u32, 2160u32);
+    let px = (0..w * h)
+        .map(|i| 0xFF00_0000 | (i * 2654435761) >> 8)
+        .collect();
+    let shot = Shot {
+        native: RectI::new(0, 0, w as i32, h as i32),
+        w,
+        h,
+        px,
+        scale: 2.0,
+        primary: true,
+        name: "4k".into(),
+    };
+    let mut o = Overlay::new(
+        shot,
+        &[],
+        Options::default(),
+        Shared {
+            mode: Mode::Rect,
+            kind: Kind::Snip,
+            delay: 3,
+        },
+    );
+    let mut buf = vec![0u32; (w * h) as usize];
+    let time = |o: &mut Overlay, buf: &mut Vec<u32>, inc: bool, n: u32| {
+        let t = std::time::Instant::now();
+        for i in 0..n {
+            o.pointer_moved(800.0 + i as f32 * 3.0, 600.0 + i as f32);
+            o.render_frame(buf, w, h, inc);
+        }
+        t.elapsed().as_secs_f64() * 1000.0 / n as f64
+    };
+    o.render(&mut buf, w, h);
+    let full = time(&mut o, &mut buf, false, 30);
+    let inc = time(&mut o, &mut buf, true, 30);
+    println!("4K pointer move, selecting: full {full:.2} ms, incremental {inc:.2} ms");
+    // A big selection with markup, drawing a new stroke.
+    o.pointer_moved(200.0, 200.0);
+    o.pointer_button(Button::Left, true);
+    o.pointer_moved(3600.0, 1900.0);
+    o.pointer_button(Button::Left, false);
+    o.activate(Btn::Tool(Tool::Pen));
+    for k in 0..40 {
+        o.pointer_moved(300.0 + k as f32 * 40.0, 300.0);
+        o.pointer_button(Button::Left, true);
+        for j in 0..60 {
+            o.pointer_moved(300.0 + k as f32 * 40.0 + j as f32, 300.0 + j as f32 * 20.0);
+        }
+        o.pointer_button(Button::Left, false);
+    }
+    o.render(&mut buf, w, h);
+    o.pointer_moved(1000.0, 1000.0);
+    o.pointer_button(Button::Left, true);
+    let t = std::time::Instant::now();
+    for i in 0..30 {
+        o.pointer_moved(1000.0 + i as f32 * 4.0, 1000.0 + i as f32 * 2.0);
+        o.render_frame(&mut buf, w, h, true);
+    }
+    let inc_draw = t.elapsed().as_secs_f64() * 1000.0 / 30.0;
+    let t = std::time::Instant::now();
+    for i in 0..30 {
+        o.pointer_moved(1120.0 + i as f32 * 4.0, 1060.0 + i as f32 * 2.0);
+        o.render_frame(&mut buf, w, h, false);
+    }
+    let full_draw = t.elapsed().as_secs_f64() * 1000.0 / 30.0;
+    println!("4K drawing over 40 strokes: full {full_draw:.2} ms, incremental {inc_draw:.2} ms");
+}
+
+#[test]
+fn isolated_windows_render_incrementally_like_full_frames() {
+    let mut o = stacked_windows(Mode::Window);
+    let mut fc = FrameCheck::new(&mut o);
+    fc.moves(&mut o, (300.0, 220.0), (70.0, 60.0), "hovering the windows");
+    click(&mut o, (70.0, 60.0));
+    fc.step(&mut o, "back window isolated");
+    o.key(Key::Escape);
+    fc.step(&mut o, "screen restored");
+    fc.moves(&mut o, (70.0, 60.0), (150.0, 100.0), "hovering again");
+}
