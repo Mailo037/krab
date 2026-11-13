@@ -13,6 +13,8 @@ pub struct Config {
     pub hotkey_alt: String,
     /// Global hotkey that starts a screen recording.
     pub hotkey_record: String,
+    /// Global hotkey that copies the text in a selected area.
+    pub hotkey_text: String,
     /// Stay in the tray / menu bar after the first snip, so the next one
     /// opens instantly and the hotkeys work.
     pub run_in_background: bool,
@@ -42,6 +44,22 @@ pub struct Config {
     pub delay_seconds: u32,
     /// Frames per second for screen recordings.
     pub record_fps: u32,
+    /// Sound in recordings: off, system, mic or both (needs ffmpeg).
+    pub record_audio: String,
+    /// Show the mouse pointer in recordings.
+    pub record_cursor: bool,
+    /// Highlight the pointer and its clicks in recordings.
+    pub record_clicks: bool,
+    /// "auto" encodes on the graphics card when possible, "software" never.
+    pub record_encoder: String,
+    /// What the colour picker copies: hex, rgb or hsl.
+    pub color_format: String,
+    /// Keep a list of recent snips in the tray menu.
+    pub history: bool,
+    /// Put new snips on a background with padding and a shadow.
+    pub frame: bool,
+    /// Two background colours for framed snips (a gradient).
+    pub frame_colors: String,
     /// Default annotation colour.
     pub color: String,
     /// Install new versions automatically (checked once a day).
@@ -54,6 +72,7 @@ impl Default for Config {
             hotkey: default_hotkey().into(),
             hotkey_alt: default_hotkey_alt().into(),
             hotkey_record: default_hotkey_record().into(),
+            hotkey_text: default_hotkey_text().into(),
             run_in_background: true,
             default_mode: "rect".into(),
             after_capture: "edit".into(),
@@ -69,6 +88,14 @@ impl Default for Config {
             loupe: true,
             delay_seconds: 3,
             record_fps: 30,
+            record_audio: "off".into(),
+            record_cursor: true,
+            record_clicks: false,
+            record_encoder: "auto".into(),
+            color_format: "hex".into(),
+            history: true,
+            frame: false,
+            frame_colors: "#F46623, #7B2FF7".into(),
             color: theme::PALETTE[0].to_hex_string(),
             auto_update: true,
         }
@@ -88,6 +115,14 @@ fn default_hotkey_alt() -> &'static str {
         ""
     } else {
         "Alt+Shift+S"
+    }
+}
+
+fn default_hotkey_text() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ""
+    } else {
+        "Alt+Shift+T"
     }
 }
 
@@ -139,6 +174,19 @@ impl Config {
         self.border_width = self.border_width.clamp(1, 32);
         self.delay_seconds = self.delay_seconds.clamp(1, 60);
         self.record_fps = self.record_fps.clamp(1, 60);
+        self.record_audio = crate::audio::Source::parse(&self.record_audio)
+            .as_str()
+            .into();
+        self.record_encoder = if self.record_encoder.eq_ignore_ascii_case("software") {
+            "software".into()
+        } else {
+            "auto".into()
+        };
+        self.color_format = match self.color_format.to_ascii_lowercase().as_str() {
+            "rgb" => "rgb".into(),
+            "hsl" => "hsl".into(),
+            _ => "hex".into(),
+        };
         self.file_format = match self.file_format.to_ascii_lowercase().as_str() {
             "jpg" | "jpeg" => "jpg".into(),
             "bmp" => "bmp".into(),
@@ -169,6 +217,10 @@ impl Config {
              # after_capture:   \"edit\" (annotate in place) or \"copy\" (copy immediately)\n\
              # default_mode:    rect | freeform | window | full\n\
              # file_format:     png | jpg | bmp | gif\n\
+             # record_audio:    off | system | mic | both (MP4 recordings, needs ffmpeg)\n\
+             # record_encoder:  auto (graphics card when possible) | software\n\
+             # color_format:    hex | rgb | hsl (what the colour picker copies)\n\
+             # frame_colors:    two colours for the background of framed snips\n\
              # auto_update:     true installs new versions automatically, false only via `krab --update`\n\n{body}"
         )
     }
@@ -203,6 +255,14 @@ impl Config {
 
     pub fn border_color(&self) -> Color {
         Color::parse(&self.border_color).unwrap_or(theme::ACCENT)
+    }
+
+    /// The two gradient colours behind framed snips.
+    pub fn frame_colors(&self) -> (Color, Color) {
+        let mut it = self.frame_colors.split(',').filter_map(Color::parse);
+        let a = it.next().unwrap_or(theme::ACCENT);
+        let b = it.next().unwrap_or(a);
+        (a, b)
     }
 }
 

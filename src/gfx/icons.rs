@@ -58,9 +58,20 @@ pub enum Icon {
     Stop,
     Dot,
     Folder,
+    Pause,
+    Play,
+    Pin,
+    Step,
+    Callout,
+    Blur,
+    Redact,
+    Ruler,
+    Frame,
+    History,
+    Scroll,
 }
 
-const COUNT: usize = Icon::Folder as usize + 1;
+const COUNT: usize = Icon::Scroll as usize + 1;
 
 /// (stroked geometry, filled geometry)
 pub fn source(icon: Icon) -> (&'static str, &'static str) {
@@ -163,6 +174,17 @@ pub fn source(icon: Icon) -> (&'static str, &'static str) {
             "G 2.4 3.5 5 9.4 5 11.5 7.5 20.5 7.5 20.5 19 3.5 19 M3.5 10 L20.5 10",
             "",
         ),
+        Icon::Pause => ("", "R 6.5 5.5 4 13 1.6 R 13.5 5.5 4 13 1.6"),
+        Icon::Play => ("", "G 1.8 8 5.5 18.5 12 8 18.5"),
+        Icon::Pin => ("M12 15.5 L12 20.5 G 1.8 8 4 16 4 15 8.5 18 13 18 15.5 6 15.5 6 13 9 8.5", ""),
+        Icon::Step => ("O 12 12 8.2", "M10.2 8.6 L12.8 7.6 L12.8 16.4 L11 16.4 L11 10 L10.2 10.3 Z"),
+        Icon::Callout => ("G 2.8 4 5 20 5 20 15.5 11 15.5 6.5 19.5 7 15.5 4 15.5 M8 9 L16 9 M8 12 L13 12", ""),
+        Icon::Blur => ("O 12 12 7.5", "O 9 10 1.2 O 13 8.6 1 O 15.4 12 1.3 O 11 14.6 1.4 O 8.4 13.4 0.8"),
+        Icon::Redact => ("R 3.5 6.5 17 11 3 M7 12 L7.01 12", "R 9.5 10 8 4 1.5"),
+        Icon::Ruler => ("G 1.6 3.5 15 15 3.5 20.5 9 9 20.5 M7 11.5 L9 13.5 M10 8.5 L13 11.5 M13 5.5 L15 7.5", ""),
+        Icon::Frame => ("R 3 4 18 16 4 R 7 8 10 8 2", ""),
+        Icon::History => ("P 2 3.5 9 3.5 4.5 8 4.5 M4.2 9 C5.8 5.6 9.3 3.8 12.7 4.3 C17 4.8 20.2 8.6 19.9 12.9 C19.6 17.2 15.9 20.4 11.6 20.2 C8.4 20 5.6 17.9 4.6 14.9 P 1.4 12 8 12 12.3 15 14", ""),
+        Icon::Scroll => ("R 6 3.5 12 17 3 P 2 9.5 9 12 6.5 14.5 9 P 2 9.5 15 12 17.5 14.5 15", ""),
     }
 }
 
@@ -339,6 +361,17 @@ pub const ALL: [Icon; COUNT] = [
     Icon::Stop,
     Icon::Dot,
     Icon::Folder,
+    Icon::Pause,
+    Icon::Play,
+    Icon::Pin,
+    Icon::Step,
+    Icon::Callout,
+    Icon::Blur,
+    Icon::Redact,
+    Icon::Ruler,
+    Icon::Frame,
+    Icon::History,
+    Icon::Scroll,
 ];
 
 /// Draw `icon` centered on `center`, fitted to a `size` x `size` box.

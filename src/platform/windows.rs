@@ -24,12 +24,16 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, GetDpiForWindow, SetProcessDpiAwarenessContext,
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, EnumWindows, GetClassNameW, GetCursorPos, GetMessagePos,
     GetWindowLongW, GetWindowRect, GetWindowTextW, IsHungAppWindow, IsIconic, IsWindow,
     IsWindowVisible, ASFW_ANY, GWL_EXSTYLE, PW_RENDERFULLCONTENT, WM_NCACTIVATE, WM_NCDESTROY,
     WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO,
 };
 
 const MONITORINFOF_PRIMARY: u32 = 1;
@@ -194,8 +198,53 @@ impl Blitter {
         }
     }
 
+    /// Draw the mouse pointer onto the grabbed area at (`x`, `y`).
+    fn draw_cursor(&mut self, x: i32, y: i32) {
+        unsafe {
+            let mut ci: CURSORINFO = zeroed();
+            ci.cbSize = size_of::<CURSORINFO>() as u32;
+            if GetCursorInfo(&mut ci) == 0 || ci.flags & CURSOR_SHOWING == 0 || ci.hCursor.is_null()
+            {
+                return;
+            }
+            let mut ii: ICONINFO = zeroed();
+            if GetIconInfo(ci.hCursor, &mut ii) == 0 {
+                return;
+            }
+            // GetIconInfo hands out copies of the cursor's bitmaps.
+            if !ii.hbmMask.is_null() {
+                DeleteObject(ii.hbmMask);
+            }
+            if !ii.hbmColor.is_null() {
+                DeleteObject(ii.hbmColor);
+            }
+            DrawIconEx(
+                self.mem,
+                ci.ptScreenPos.x - ii.xHotspot as i32 - x,
+                ci.ptScreenPos.y - ii.yHotspot as i32 - y,
+                ci.hCursor,
+                0,
+                0,
+                0,
+                null_mut(),
+                DI_NORMAL,
+            );
+            GdiFlush();
+        }
+    }
+
     /// Copy the screen area at (`x`, `y`) into `out` as `0xFFRRGGBB`.
     fn grab(&mut self, x: i32, y: i32, out: &mut Vec<u32>) -> Result<(), String> {
+        self.grab_with(x, y, out, false)
+    }
+
+    fn grab_with(
+        &mut self,
+        x: i32,
+        y: i32,
+        out: &mut Vec<u32>,
+        cursor: bool,
+    ) -> Result<(), String> {
         let n = (self.w * self.h) as usize;
         unsafe {
             if BitBlt(
@@ -211,6 +260,9 @@ impl Blitter {
             ) == 0
             {
                 return Err("BitBlt failed".into());
+            }
+            if cursor {
+                self.draw_cursor(x, y);
             }
             let src = std::slice::from_raw_parts(self.bits, n);
             out.clear();
@@ -451,19 +503,34 @@ pub struct Grabber {
     blitter: Blitter,
     x: i32,
     y: i32,
+    cursor: bool,
 }
 
 impl Grabber {
-    pub fn new(_monitor: usize, monitor_native: RectI, local: RectI) -> Result<Self, String> {
+    pub fn new(
+        _monitor: usize,
+        monitor_native: RectI,
+        local: RectI,
+        cursor: bool,
+    ) -> Result<Self, String> {
         Ok(Self {
             blitter: Blitter::new(local.w, local.h)?,
             x: monitor_native.x + local.x,
             y: monitor_native.y + local.y,
+            cursor,
         })
     }
 
     pub fn grab(&mut self, out: &mut Vec<u32>) -> Result<(), String> {
-        self.blitter.grab(self.x, self.y, out)
+        self.blitter.grab_with(self.x, self.y, out, self.cursor)
+    }
+}
+
+/// Whether a mouse button is held down right now.
+pub fn mouse_down() -> bool {
+    unsafe {
+        (GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0
+            || (GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000) != 0
     }
 }
 

@@ -885,23 +885,25 @@ impl App {
 
     fn start_recording(&mut self, el: &ActiveEventLoop, index: usize, native: RectI, rect: RectI) {
         let proxy = self.proxy.clone();
-        let recorder = Recorder::start(
-            index,
-            native,
-            rect,
-            self.cfg.record_fps,
-            self.cfg.video_dir(),
-            move |result| {
-                let _ = proxy.send_event(UserEvent::RecordingDone(result));
-            },
-        );
-        let started = recorder.started;
+        let settings = crate::record::Settings {
+            fps: self.cfg.record_fps,
+            dir: self.cfg.video_dir(),
+            cursor: self.cfg.record_cursor,
+            clicks: self.cfg.record_clicks,
+            audio: crate::audio::Source::parse(&self.cfg.record_audio),
+            encoder: self.cfg.record_encoder.clone(),
+        };
+        let recorder = Recorder::start(index, native, rect, settings, move |result| {
+            let _ = proxy.send_event(UserEvent::RecordingDone(result));
+        });
+        let control = recorder.control.clone();
         self.recorder = Some(recorder);
         self.show_hud(
             el,
             Hud::Recording {
-                started,
+                control,
                 saving: false,
+                pointer: None,
             },
             Anchor::TopCenter,
             None,
@@ -1028,6 +1030,12 @@ impl App {
         match event {
             WindowEvent::RedrawRequested => draw_hud(win),
             WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => {
+                if let (WindowEvent::CursorMoved { position, .. }, Hud::Recording { pointer, .. }) =
+                    (&event, &mut win.hud)
+                {
+                    *pointer = Some(crate::geom::Pt::new(position.x as f32, position.y as f32));
+                    win.window.request_redraw();
+                }
                 if !win.hovered {
                     win.hovered = true;
                     win.window.request_redraw();
@@ -1035,6 +1043,9 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 win.hovered = false;
+                if let Hud::Recording { pointer, .. } = &mut win.hud {
+                    *pointer = None;
+                }
                 win.window.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -1052,8 +1063,21 @@ impl App {
                     self.delay = None;
                     self.huds.remove(idx);
                 }
-                Hud::Recording { saving, .. } => {
-                    if !saving {
+                Hud::Recording {
+                    saving,
+                    pointer,
+                    control,
+                } => {
+                    let size = win.window.inner_size();
+                    let hit = pointer.map(|p| {
+                        win.hud
+                            .hit(p, size.width as f32, size.height as f32, win.scale)
+                    });
+                    if *saving {
+                    } else if hit == Some(crate::hud::HudHit::Pause) {
+                        control.toggle_pause();
+                        win.window.request_redraw();
+                    } else {
                         self.stop_recording();
                     }
                 }

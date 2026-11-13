@@ -2,6 +2,7 @@
 
 pub mod annotate;
 pub mod app;
+pub mod audio;
 pub mod brand;
 pub mod capture;
 pub mod cli;

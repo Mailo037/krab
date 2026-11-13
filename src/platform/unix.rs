@@ -123,8 +123,19 @@ pub struct Grabber {
     local: RectI,
 }
 
+/// Not available here; recordings show no click highlights.
+pub fn mouse_down() -> bool {
+    false
+}
+
 impl Grabber {
-    pub fn new(monitor: usize, _monitor_native: RectI, local: RectI) -> Result<Self, String> {
+    /// The pointer is not drawn: the platform capture leaves it out.
+    pub fn new(
+        monitor: usize,
+        _monitor_native: RectI,
+        local: RectI,
+        _cursor: bool,
+    ) -> Result<Self, String> {
         let monitor = Monitor::all()
             .map_err(|e| e.to_string())?
             .into_iter()

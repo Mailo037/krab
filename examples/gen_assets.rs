@@ -536,8 +536,11 @@ fn scene_huds(snip: &krab::output::Image) -> (Vec<u32>, u32, u32) {
         deadline: Instant::now() + Duration::from_millis(2600),
     };
     let recording = Hud::Recording {
-        started: Instant::now() - Duration::from_secs(83),
+        control: std::sync::Arc::new(krab::record::Control::started_at(
+            Instant::now() - Duration::from_secs(83),
+        )),
         saving: false,
+        pointer: None,
     };
     // Lay the three surfaces out as one centred row.
     let gap = 80.0;

@@ -117,8 +117,15 @@ pub struct RegionGrabber {
 impl RegionGrabber {
     /// `monitor` is the index of the shot the region was selected on and
     /// `local` the region in that shot's pixels.
-    pub fn new(monitor: usize, monitor_native: RectI, local: RectI) -> Result<Self, String> {
-        let inner = platform::Grabber::new(monitor, monitor_native, local)?;
+    /// With `cursor`, the mouse pointer is drawn into every frame where the
+    /// platform supports it.
+    pub fn new(
+        monitor: usize,
+        monitor_native: RectI,
+        local: RectI,
+        cursor: bool,
+    ) -> Result<Self, String> {
+        let inner = platform::Grabber::new(monitor, monitor_native, local, cursor)?;
         Ok(Self {
             inner,
             w: local.w as u32,

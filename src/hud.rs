@@ -4,7 +4,9 @@
 use crate::geom::{Pt, RectF};
 use crate::gfx::{icons, text, theme, Canvas, Color};
 use crate::output::Image;
+use crate::record::Control;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub enum Hud {
@@ -20,10 +22,20 @@ pub enum Hud {
         deadline: Instant,
     },
     Recording {
-        started: Instant,
+        control: Arc<Control>,
         /// Set once stop was requested and the file is being finalized.
         saving: bool,
+        /// Pointer position (device pixels) while it is over the HUD.
+        pointer: Option<Pt>,
     },
+}
+
+/// What a click on a HUD does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HudHit {
+    Pause,
+    Stop,
+    Other,
 }
 
 impl Hud {
@@ -36,7 +48,30 @@ impl Hud {
                 ((112.0 + text_w + 22.0).clamp(280.0, 440.0), 78.0)
             }
             Hud::Countdown { .. } => (250.0, 52.0),
-            Hud::Recording { .. } => (176.0, 46.0),
+            Hud::Recording { .. } => (214.0, 46.0),
+        }
+    }
+
+    /// The pause and stop buttons of the recording HUD (device pixels).
+    fn recording_buttons(w: f32, h: f32, s: f32) -> (RectF, RectF) {
+        let cy = h / 2.0;
+        let stop = RectF::new(w - 78.0 * s, cy - 15.0 * s, 68.0 * s, 30.0 * s);
+        let pause = RectF::new(stop.x - 36.0 * s, cy - 15.0 * s, 30.0 * s, 30.0 * s);
+        (pause, stop)
+    }
+
+    /// What clicking at `p` (device pixels) on a `w` x `h` HUD does.
+    pub fn hit(&self, p: Pt, w: f32, h: f32, scale: f32) -> HudHit {
+        match self {
+            Hud::Recording { .. } => {
+                let (pause, _) = Self::recording_buttons(w, h, scale);
+                if pause.contains(p) {
+                    HudHit::Pause
+                } else {
+                    HudHit::Stop
+                }
+            }
+            _ => HudHit::Other,
         }
     }
 
@@ -132,7 +167,11 @@ impl Hud {
                     theme::ICON_DISABLED,
                 );
             }
-            Hud::Recording { started, saving } => {
+            Hud::Recording {
+                control,
+                saving,
+                pointer,
+            } => {
                 let cy = fh / 2.0;
                 if *saving {
                     face.draw_centered(
@@ -145,8 +184,10 @@ impl Hud {
                     );
                     return;
                 }
-                // Blink the dot once a second.
-                let on = started.elapsed().as_millis() % 1000 < 600;
+                let paused = control.is_paused();
+                let elapsed = control.elapsed();
+                // Blink the dot once a second; hold it dim while paused.
+                let on = !paused && elapsed.as_millis() % 1000 < 600;
                 c.fill_circle(
                     Pt::new(22.0 * s, cy),
                     6.0 * s,
@@ -156,14 +197,40 @@ impl Hud {
                         theme::DANGER.alpha(0.35)
                     },
                 );
-                let label = crate::record::format_elapsed(started.elapsed());
+                let label = crate::record::format_elapsed(elapsed);
                 let base = face.baseline_for_center(cy, 14.5 * s);
-                face.draw(&mut c, &label, 38.0 * s, base, 14.5 * s, theme::TEXT);
-                let btn = RectF::new(fw - 78.0 * s, cy - 15.0 * s, 68.0 * s, 30.0 * s);
+                face.draw(
+                    &mut c,
+                    &label,
+                    38.0 * s,
+                    base,
+                    14.5 * s,
+                    if paused { theme::TEXT_DIM } else { theme::TEXT },
+                );
+                let (pause, btn) = Self::recording_buttons(fw, fh, s);
+                let over = |r: RectF| hovered && pointer.is_some_and(|p| r.contains(p));
+                if over(pause) || paused {
+                    c.fill_rrect(pause, 7.0 * s, theme::HOVER);
+                }
+                icons::draw(
+                    &mut c,
+                    if paused {
+                        icons::Icon::Play
+                    } else {
+                        icons::Icon::Pause
+                    },
+                    pause.center(),
+                    18.0 * s,
+                    Color::WHITE,
+                );
                 c.fill_rrect(
                     btn,
                     7.0 * s,
-                    if hovered { theme::DANGER } else { theme::HOVER },
+                    if hovered && !over(pause) {
+                        theme::DANGER
+                    } else {
+                        theme::HOVER
+                    },
                 );
                 icons::draw(
                     &mut c,
@@ -246,12 +313,14 @@ mod tests {
                 deadline: Instant::now() + std::time::Duration::from_secs(3),
             },
             Hud::Recording {
-                started: Instant::now(),
+                control: Arc::new(Control::new()),
                 saving: false,
+                pointer: None,
             },
             Hud::Recording {
-                started: Instant::now(),
+                control: Arc::new(Control::new()),
                 saving: true,
+                pointer: None,
             },
         ];
         for hud in &huds {
@@ -264,6 +333,21 @@ mod tests {
                 assert!(buf.iter().any(|p| *p != theme::PANEL_SOLID.to_u32()));
             }
         }
+    }
+
+    #[test]
+    fn recording_hud_tells_pause_from_stop() {
+        let hud = Hud::Recording {
+            control: Arc::new(Control::new()),
+            saving: false,
+            pointer: None,
+        };
+        let (w, h) = hud.size();
+        let (pause, stop) = Hud::recording_buttons(w, h, 1.0);
+        assert!(pause.right() < stop.x, "buttons overlap");
+        assert_eq!(hud.hit(pause.center(), w, h, 1.0), HudHit::Pause);
+        assert_eq!(hud.hit(stop.center(), w, h, 1.0), HudHit::Stop);
+        assert_eq!(hud.hit(Pt::new(10.0, 10.0), w, h, 1.0), HudHit::Stop);
     }
 
     #[test]
