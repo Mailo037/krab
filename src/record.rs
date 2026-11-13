@@ -699,7 +699,8 @@ mod tests {
 
     #[test]
     fn paused_time_does_not_count() {
-        let c = Control::new();
+        let start = Instant::now();
+        let c = Control::started_at(start);
         std::thread::sleep(Duration::from_millis(30));
         c.set_paused(true);
         let at_pause = c.elapsed();
@@ -708,13 +709,19 @@ mod tests {
         c.set_paused(false);
         std::thread::sleep(Duration::from_millis(20));
         let e = c.elapsed();
-        assert!(
-            e >= Duration::from_millis(45) && e < Duration::from_millis(90),
-            "{e:?}"
-        );
+        let wall = start.elapsed();
         let pauses = c.pauses();
         assert_eq!(pauses.len(), 1);
-        assert!(pauses[0].1 - pauses[0].0 >= 0.055);
+        let paused = Duration::from_secs_f64(pauses[0].1 - pauses[0].0);
+        assert!(paused >= Duration::from_millis(55), "{paused:?}");
+        assert!(e >= Duration::from_millis(45), "{e:?}");
+        // Measured against the wall clock, not fixed bounds: sleeps on a busy
+        // CI machine can overshoot by a lot.
+        assert!(e + paused <= wall, "{e:?} + {paused:?} > {wall:?}");
+        assert!(
+            e + paused + Duration::from_millis(50) >= wall,
+            "{e:?} + {paused:?} << {wall:?}"
+        );
     }
 
     #[test]
