@@ -682,6 +682,142 @@ fn delay_button_requests_a_delayed_restart() {
     assert!(matches!(o.take_outcome(), Some(Outcome::Delay(5))));
 }
 
+fn delay_slot(o: &Overlay) -> RectF {
+    o.bars()
+        .main
+        .as_ref()
+        .unwrap()
+        .slots
+        .iter()
+        .find(|s| s.btn == Btn::Delay)
+        .unwrap()
+        .rect
+}
+
+fn right_click(o: &mut Overlay, at: Pt) {
+    o.pointer_moved(at.x, at.y);
+    o.pointer_button(Button::Right, true);
+    o.pointer_button(Button::Right, false);
+}
+
+#[test]
+fn right_click_on_the_delay_button_offers_the_waits() {
+    let mut o = overlay(Mode::Rect);
+    let slot = delay_slot(&o);
+    right_click(&mut o, slot.center());
+    let menu = o.menu.as_ref().expect("menu open");
+    let items = menu.items.clone();
+    assert_eq!(
+        items,
+        menu::DELAY_STEPS
+            .map(|n| Some(menu::Item::Delay(n)))
+            .to_vec()
+    );
+    let (frame, rows) = o.menu_layout().unwrap();
+    assert!(frame.y >= slot.bottom(), "hangs below the button");
+
+    // Choosing a wait sets it; it does not start it.
+    let i = items
+        .iter()
+        .position(|it| *it == Some(menu::Item::Delay(10)))
+        .unwrap();
+    let r = rows[i].unwrap().center();
+    click(&mut o, (r.x, r.y));
+    assert!(o.menu.is_none());
+    assert_eq!(o.shared().delay, 10);
+    assert!(o.take_outcome().is_none());
+
+    // A second right click on the button closes its menu again.
+    right_click(&mut o, slot.center());
+    assert!(o.menu.as_ref().is_some_and(|m| m.is_delay()));
+    right_click(&mut o, slot.center());
+    assert!(o.menu.is_none());
+
+    // Right click elsewhere still opens the usual menu.
+    right_click(&mut o, Pt::new(500.0, 500.0));
+    assert!(o.menu.as_ref().is_some_and(|m| !m.is_delay()));
+    o.key(Key::Escape);
+
+    let c = delay_slot(&o).center();
+    click(&mut o, (c.x, c.y));
+    assert!(matches!(o.take_outcome(), Some(Outcome::Delay(10))));
+}
+
+#[test]
+fn the_delay_menu_also_offers_a_wait_from_the_config() {
+    let mut o = Overlay::new(
+        shot(),
+        &[],
+        Options::default(),
+        Shared {
+            mode: Mode::Rect,
+            kind: Kind::Snip,
+            delay: 7,
+        },
+    );
+    let slot = delay_slot(&o);
+    right_click(&mut o, slot.center());
+    let items = &o.menu.as_ref().unwrap().items;
+    let waits: Vec<u32> = items
+        .iter()
+        .filter_map(|it| match it {
+            Some(menu::Item::Delay(n)) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(waits, [1, 3, 5, 7, 10, 15]);
+}
+
+#[test]
+fn menus_fade_in_frame_by_frame_and_end_exactly() {
+    let animated = Options {
+        animate: true,
+        ..Options::default()
+    };
+    let shared = Shared {
+        mode: Mode::Rect,
+        kind: Kind::Snip,
+        delay: 3,
+    };
+    let mut o = Overlay::new(shot(), &[], animated, shared);
+    let t0 = Instant::now();
+    o.clock = Some(t0);
+    let mut fc = FrameCheck::new(&mut o);
+    assert!(
+        o.next_wakeup().is_none(),
+        "the first frame does not fade in"
+    );
+
+    right_click(&mut o, Pt::new(320.0, 300.0));
+    fc.step(&mut o, "menu appears");
+    let (frame, _) = o.menu_layout().unwrap();
+    let probe = ((frame.y as u32 + 8) * W + frame.center().x as u32) as usize;
+    let first = fc.full[probe];
+    assert!(o.next_wakeup().is_some_and(|t| t <= t0 + render::FRAME));
+    o.tick();
+    assert!(o.take_dirty(), "a fading frame asks for the next one");
+
+    o.clock = Some(t0 + render::FADE / 2);
+    fc.step(&mut o, "menu half faded in");
+    let half = fc.full[probe];
+    o.clock = Some(t0 + render::FADE + render::FRAME);
+    fc.step(&mut o, "menu faded in");
+    let done = fc.full[probe];
+    assert!(
+        first != half && half != done,
+        "{first:08X} {half:08X} {done:08X}"
+    );
+    assert!(o.next_wakeup().is_none(), "the fade is over");
+
+    // The last frame is exactly the menu drawn without animations.
+    let mut still = overlay(Mode::Rect);
+    let mut buf = vec![0u32; (W * H) as usize];
+    still.render(&mut buf, W, H);
+    right_click(&mut still, Pt::new(320.0, 300.0));
+    still.render(&mut buf, W, H);
+    assert!(buf == fc.full, "settled fade differs from a plain frame");
+}
+
 #[test]
 fn toolbar_buttons_are_clickable_and_stay_on_screen() {
     for sel in [

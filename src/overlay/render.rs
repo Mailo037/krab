@@ -5,7 +5,33 @@ use super::{edit_size, Btn, Drag, Kind, Mode, Overlay, Win};
 use crate::annotate::{Annotation, Shape, Source, Tool};
 use crate::geom::{merge_rects, Pt, RectF, RectI};
 use crate::gfx::{icons, text, theme, Canvas, Color};
+use std::time::{Duration, Instant};
 use tiny_skia::{BlendMode, LineCap, LineJoin, PathBuilder, Stroke, StrokeDash, Transform};
+
+/// How long something takes to fade in.
+pub(super) const FADE: Duration = Duration::from_millis(130);
+/// How long the message at the top takes to fade out.
+pub(super) const FADE_OUT: Duration = Duration::from_millis(220);
+/// Time between the frames of a fade.
+pub(super) const FRAME: Duration = Duration::from_millis(12);
+
+/// Chrome that fades in when it appears.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Part {
+    /// The toolbar; `true` is the one shown once an area is selected.
+    Toolbar(bool),
+    Props,
+    Palette,
+    Tooltip,
+    /// A menu, by its serial number.
+    Menu(u64),
+}
+
+/// Fade-in progress `age` into it, eased out (fast start, soft landing).
+fn ease(age: Duration) -> f32 {
+    let t = (age.as_secs_f32() / FADE.as_secs_f32()).clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
 
 /// Darken a row of pixels to ~44% brightness. Branch-free, so the compiler
 /// vectorizes it; a 4K frame takes a couple of milliseconds.
@@ -182,6 +208,68 @@ impl Overlay {
         }
     }
 
+    /// Note which parts this frame shows and since when, so the ones that
+    /// just appeared fade in.
+    fn track_fades(&mut self, f: &FrameInfo) {
+        let now = self.now();
+        self.frame_time = now;
+        let mut parts = Vec::new();
+        if f.bars.main.is_some() {
+            parts.push(Part::Toolbar(self.sel.is_some()));
+        }
+        if f.bars.props.is_some() {
+            parts.push(Part::Props);
+        }
+        if !f.bars.palette.is_empty() {
+            parts.push(Part::Palette);
+        }
+        if f.idle && self.menu.is_none() && self.hover_btn.is_some() {
+            parts.push(Part::Tooltip);
+        }
+        if let Some(m) = &self.menu {
+            parts.push(Part::Menu(m.serial));
+        }
+        let prev = self.shown.take();
+        let shown: Vec<(Part, Option<Instant>)> = parts
+            .into_iter()
+            .map(|p| {
+                let since = match &prev {
+                    // What the first frame shows is simply there.
+                    None => None,
+                    Some(prev) => match prev.iter().find(|(q, _)| *q == p) {
+                        Some((_, t)) => *t,
+                        // Something new starts one frame into its fade, so
+                        // it shows at once.
+                        None => Some(now.checked_sub(FRAME).unwrap_or(now)),
+                    },
+                };
+                (p, since)
+            })
+            .collect();
+        let ends = shown
+            .iter()
+            .filter_map(|(_, t)| *t)
+            .chain(self.flash.as_ref().map(|(_, t)| *t))
+            .map(|t| t + FADE)
+            .filter(|end| *end > now)
+            .max();
+        self.fade_until = ends.filter(|_| self.opts.animate);
+        self.shown = Some(shown);
+    }
+
+    /// How far `part` has faded in this frame, 0..=1.
+    fn fade(&self, part: Part) -> f32 {
+        if !self.opts.animate {
+            return 1.0;
+        }
+        self.shown
+            .iter()
+            .flatten()
+            .find(|(p, _)| *p == part)
+            .and_then(|(_, t)| *t)
+            .map_or(1.0, |t| ease(self.frame_time.saturating_duration_since(t)))
+    }
+
     /// Keep the selection with its finished markup rendered in one buffer,
     /// so frames copy it instead of redrawing every annotation.
     fn update_layer(&mut self, f: &FrameInfo) {
@@ -331,6 +419,7 @@ impl Overlay {
         }
         self.ensure_size(w, h);
         let f = self.frame_info();
+        self.track_fades(&f);
         self.update_layer(&f);
 
         // Where the toolbars, loupe, labels and menu land this frame.
@@ -504,12 +593,36 @@ impl Overlay {
         }
 
         // --- toolbars ---------------------------------------------------------
-        for bar in bars.iter() {
-            self.draw_bar(c, bar);
+        // Each fades in as it appears; the palette also slides out of the
+        // toolbar.
+        c.layer(
+            self.fade(Part::Toolbar(self.sel.is_some())),
+            0.0,
+            0.0,
+            |c| {
+                for bar in bars.main.iter().chain(&bars.main2) {
+                    self.draw_bar(c, bar);
+                }
+            },
+        );
+        if let Some(bar) = &bars.props {
+            c.layer(self.fade(Part::Props), 0.0, 0.0, |c| self.draw_bar(c, bar));
+        }
+        if let Some(first) = bars.palette.first() {
+            let a = self.fade(Part::Palette);
+            let below = bars.main.as_ref().is_some_and(|m| first.rect.y > m.rect.y);
+            let dy = (1.0 - a) * 6.0 * s * if below { -1.0 } else { 1.0 };
+            c.layer(a, 0.0, dy, |c| {
+                for bar in &bars.palette {
+                    self.draw_bar(c, bar);
+                }
+            });
         }
         if idle && self.menu.is_none() {
             if let Some(btn) = self.hover_btn {
-                self.draw_tooltip(c, bars, btn);
+                c.layer(self.fade(Part::Tooltip), 0.0, 0.0, |c| {
+                    self.draw_tooltip(c, bars, btn)
+                });
             }
         }
 
@@ -553,10 +666,36 @@ impl Overlay {
                 false,
             );
         }
-        if let Some((msg, _)) = &self.flash {
-            self.draw_pill(c, msg, 70.0 * s, true);
+        if let Some((msg, since)) = &self.flash {
+            let (a, dy) = self.flash_fade(*since);
+            c.layer(a, 0.0, dy, |c| self.draw_pill(c, msg, 70.0 * s, true));
         }
-        self.draw_menu(c);
+        if let (Some(m), Some((frame, _))) = (&self.menu, self.menu_layout()) {
+            // The menu drops out of what opened it.
+            let a = self.fade(Part::Menu(m.serial));
+            let from = m.anchor.map_or(m.at, |r| r.center());
+            let dir = if frame.center().y >= from.y {
+                -1.0
+            } else {
+                1.0
+            };
+            c.layer(a, 0.0, dir * (1.0 - a) * 5.0 * s, |c| self.draw_menu(c));
+        }
+    }
+
+    /// Opacity and vertical offset of the message at the top: it drops in
+    /// and fades out at the end.
+    fn flash_fade(&self, since: Instant) -> (f32, f32) {
+        if !self.opts.animate {
+            return (1.0, 0.0);
+        }
+        let age = self.frame_time.saturating_duration_since(since) + FRAME;
+        let shown = ease(age);
+        let left = super::FLASH_TIME.saturating_sub(age).as_secs_f32() / FADE_OUT.as_secs_f32();
+        (
+            shown.min(left.clamp(0.0, 1.0)),
+            -(1.0 - shown) * 8.0 * self.scale,
+        )
     }
 
     fn draw_lasso(&self, c: &mut Canvas, pts: &[Pt], closed: bool) {
@@ -758,21 +897,29 @@ impl Overlay {
         let tip = self.btn_tip(btn);
         let em = 12.0 * s;
         let face = text::ui();
-        // "Label   Keys": the keys are drawn as keycaps after a dot.
+        // "Label   Keys": the keys are drawn as keycaps after a dot, followed
+        // by a mouse for what the wheel or a right click does.
         let (label, keys): (&str, Vec<&str>) = match tip.split_once("   ") {
-            Some((l, k)) if !k.starts_with('(') => (l, k.split('+').collect()),
-            _ => (tip.as_str(), Vec::new()),
+            Some((l, k)) => (l, k.split('+').collect()),
+            None => (tip.as_str(), Vec::new()),
         };
+        let mouse = self.btn_mouse(btn);
         let key_em = 11.0 * s;
         let cap_h = 18.0 * s;
         let cap_w = |k: &str| (face.measure(k, key_em) + 10.0 * s).max(cap_h);
+        // The mouse is narrow: it takes less room than its icon box.
+        let (mouse_size, mouse_w) = (21.0 * s, 13.0 * s);
         let dot_w = 14.0 * s;
-        let keys_w: f32 = if keys.is_empty() {
+        let hints = keys.len() + mouse.len();
+        let hints_w: f32 = if hints == 0 {
             0.0
         } else {
-            dot_w + keys.iter().map(|k| cap_w(k)).sum::<f32>() + 3.0 * s * (keys.len() - 1) as f32
+            dot_w
+                + keys.iter().map(|k| cap_w(k)).sum::<f32>()
+                + mouse_w * mouse.len() as f32
+                + 3.0 * s * (hints - 1) as f32
         };
-        let tw = face.measure(label, em) + keys_w;
+        let tw = face.measure(label, em) + hints_w;
         let (pw, ph) = (tw + 18.0 * s, 28.0 * s);
         let gap = 7.0 * s;
 
@@ -804,7 +951,7 @@ impl Overlay {
             em,
             theme::TEXT,
         );
-        if !keys.is_empty() {
+        if hints > 0 {
             c.fill_circle(Pt::new(x + dot_w / 2.0, cy), 1.6 * s, theme::TEXT_DIM);
             x += dot_w;
             for k in &keys {
@@ -813,6 +960,18 @@ impl Overlay {
                 c.fill_rrect(cap, 5.0 * s, Color::rgba(255, 255, 255, 30));
                 face.draw_centered(c, k, cap.x + w / 2.0, cy, key_em, theme::TEXT);
                 x += w + 3.0 * s;
+            }
+            for icon in mouse {
+                // The part of the mouse that does it lights up.
+                icons::draw_two_tone(
+                    c,
+                    *icon,
+                    Pt::new(x + mouse_w / 2.0, cy),
+                    mouse_size,
+                    theme::TEXT_DIM,
+                    theme::ACCENT,
+                );
+                x += mouse_w + 3.0 * s;
             }
         }
     }

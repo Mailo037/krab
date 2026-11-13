@@ -172,6 +172,8 @@ pub struct Options {
     pub frame_colors: (Color, Color),
     /// What the colour picker copies: "hex", "rgb" or "hsl".
     pub color_format: String,
+    /// Fade menus, tooltips and the like in as they appear.
+    pub animate: bool,
 }
 
 impl Options {
@@ -187,6 +189,7 @@ impl Options {
             frame: cfg.frame.then(|| cfg.frame_colors()),
             frame_colors: cfg.frame_colors(),
             color_format: cfg.color_format.clone(),
+            animate: crate::platform::animations_enabled(),
         }
     }
 }
@@ -204,6 +207,8 @@ impl Default for Options {
             frame: None,
             frame_colors: (theme::ACCENT, Color::rgb(0x7B, 0x2F, 0xF7)),
             color_format: "hex".into(),
+            // Off by default so a rendered frame does not depend on timing.
+            animate: false,
         }
     }
 }
@@ -316,6 +321,8 @@ pub struct Overlay {
     started_selection: bool,
     /// The right-click menu, while open.
     menu: Option<menu::Menu>,
+    /// Menus opened so far.
+    menu_serial: u64,
     /// The press that closed the menu must not also start a selection.
     swallow_release: bool,
 
@@ -327,6 +334,15 @@ pub struct Overlay {
     prev: Option<render::PrevFrame>,
     /// Reused buffer for partial repaints.
     scratch: Vec<u32>,
+    /// What the last frame showed of the parts that fade in, and since when.
+    shown: Option<Vec<(render::Part, Option<Instant>)>>,
+    /// The moment the frame being drawn shows (fades are measured from it).
+    frame_time: Instant,
+    /// When the fades the last frame was in the middle of are over.
+    fade_until: Option<Instant>,
+    /// Tests stop the clock to check what a fade looks like part way.
+    #[cfg(test)]
+    clock: Option<Instant>,
 }
 
 const FLASH_TIME: Duration = Duration::from_millis(1500);
@@ -396,12 +412,26 @@ impl Overlay {
             dirty: true,
             started_selection: false,
             menu: None,
+            menu_serial: 0,
             swallow_release: false,
             ann_version: 0,
             layer: None,
             prev: None,
             scratch: Vec::new(),
+            shown: None,
+            frame_time: Instant::now(),
+            fade_until: None,
+            #[cfg(test)]
+            clock: None,
         }
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(t) = self.clock {
+            return t;
+        }
+        Instant::now()
     }
 
     // ---- accessors used by the window layer -------------------------------
@@ -455,16 +485,40 @@ impl Overlay {
         self.sel.as_ref().map(|s| s.rect.round())
     }
 
-    /// When the overlay needs a redraw without input (transient messages).
+    /// When the overlay needs a redraw without input (transient messages,
+    /// the next frame of a fade).
     pub fn next_wakeup(&self) -> Option<Instant> {
-        self.flash.as_ref().map(|(_, t)| *t + FLASH_TIME)
+        let now = self.now();
+        let frame = now + render::FRAME;
+        let flash = self.flash.as_ref().map(|(_, t)| {
+            let gone = *t + FLASH_TIME;
+            let fade_out = gone - render::FADE_OUT;
+            match self.opts.animate {
+                true if now < fade_out => fade_out,
+                true => frame.min(gone),
+                false => gone,
+            }
+        });
+        let fade = self.fade_until.map(|_| frame);
+        flash.into_iter().chain(fade).min()
     }
 
     pub fn tick(&mut self) {
         if let Some((_, t)) = &self.flash {
-            if t.elapsed() >= FLASH_TIME {
+            let age = self.now().saturating_duration_since(*t);
+            if age >= FLASH_TIME {
                 self.flash = None;
                 self.dirty = true;
+            } else if self.opts.animate && age >= FLASH_TIME - render::FADE_OUT {
+                self.dirty = true;
+            }
+        }
+        // Frames until the fades are over, and one more that shows them done;
+        // a window that is not drawn meanwhile does not keep this going.
+        if let Some(t) = self.fade_until {
+            self.dirty = true;
+            if self.now() >= t {
+                self.fade_until = None;
             }
         }
     }
@@ -1031,7 +1085,7 @@ impl Overlay {
                         self.run_menu(i);
                     }
                 }
-                (Button::Right, true) => self.open_menu(),
+                (Button::Right, true) => self.context_click(),
                 (Button::Right, false) => {}
             }
             return;
@@ -1045,7 +1099,7 @@ impl Overlay {
             }
             // Right click cancels a drag in progress, otherwise opens the menu.
             (Button::Right, true) if !matches!(self.drag, Drag::None) => self.step_back(),
-            (Button::Right, true) => self.open_menu(),
+            (Button::Right, true) => self.context_click(),
             (Button::Right, false) => {}
         }
     }
@@ -1404,7 +1458,7 @@ impl Overlay {
             return;
         }
         if self.hover_btn == Some(Btn::Delay) {
-            const STEPS: [u32; 3] = [3, 5, 10];
+            const STEPS: [u32; menu::DELAY_STEPS.len()] = menu::DELAY_STEPS;
             let i = STEPS.iter().position(|s| *s >= self.ui.delay).unwrap_or(0);
             let n = if dy > 0.0 {
                 (i + 1) % STEPS.len()

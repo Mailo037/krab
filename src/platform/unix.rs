@@ -123,6 +123,11 @@ pub struct Grabber {
     local: RectI,
 }
 
+/// No system-wide switch is read here: fades are always on.
+pub fn animations_enabled() -> bool {
+    true
+}
+
 /// Not available here; recordings show no click highlights.
 pub fn mouse_down() -> bool {
     false

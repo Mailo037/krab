@@ -53,6 +53,24 @@ pub fn attach_console() {
     }
 }
 
+/// Whether Windows shows animations ("Animation effects" in the
+/// accessibility settings); Krab's own fades follow it.
+pub fn animations_enabled() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SystemParametersInfoW, SPI_GETCLIENTAREAANIMATION,
+    };
+    let mut on: i32 = 1;
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            &mut on as *mut i32 as *mut core::ffi::c_void,
+            0,
+        )
+    };
+    ok == 0 || on != 0
+}
+
 /// Let the already-running instance take focus when we hand a request to it.
 pub fn allow_foreground_handoff() {
     unsafe {

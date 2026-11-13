@@ -182,7 +182,7 @@ impl Overlay {
             Btn::Mode(Mode::Freeform) => "Freeform   F".into(),
             Btn::Mode(Mode::Window) => "Window   W".into(),
             Btn::Mode(Mode::Fullscreen) => "Full screen   M".into(),
-            Btn::Delay => format!("Snip in {} s   (scroll to change)", self.ui.delay),
+            Btn::Delay => format!("Snip in {} s", self.ui.delay),
             Btn::Cancel => "Close   Esc".into(),
             Btn::Tool(t) => match t {
                 Tool::Select => "Move / resize   V",
@@ -212,6 +212,17 @@ impl Overlay {
             Btn::More => "Save, pin, text and more".into(),
             Btn::Color(i) => theme::PALETTE[i as usize].to_hex_string(),
             Btn::Width(i) => ["Small", "Medium", "Large"][i as usize].into(),
+        }
+    }
+
+    /// What the mouse can do on a button besides clicking, shown in its
+    /// tooltip next to the keys: turning the wheel, a right click.
+    pub(super) fn btn_mouse(&self, btn: Btn) -> &'static [Icon] {
+        match btn {
+            Btn::Delay => &[Icon::MouseWheel, Icon::MouseRight],
+            // The wheel changes the width anywhere on the selection.
+            Btn::Width(_) => &[Icon::MouseWheel],
+            _ => &[],
         }
     }
 

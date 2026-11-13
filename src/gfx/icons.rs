@@ -72,9 +72,13 @@ pub enum Icon {
     More,
     Chevron,
     ChevronUp,
+    /// A mouse; the filled part is its wheel (see [`draw_two_tone`]).
+    MouseWheel,
+    /// A mouse; the filled part is its right button.
+    MouseRight,
 }
 
-const COUNT: usize = Icon::ChevronUp as usize + 1;
+const COUNT: usize = Icon::MouseRight as usize + 1;
 
 /// (stroked geometry, filled geometry)
 pub fn source(icon: Icon) -> (&'static str, &'static str) {
@@ -191,6 +195,11 @@ pub fn source(icon: Icon) -> (&'static str, &'static str) {
         Icon::More => ("", "O 5.5 12 1.9 O 12 12 1.9 O 18.5 12 1.9"),
         Icon::Chevron => ("P 1.6 6.5 9.5 12 15 17.5 9.5", ""),
         Icon::ChevronUp => ("P 1.6 6.5 14.5 12 9 17.5 14.5", ""),
+        Icon::MouseWheel => ("R 6.5 3 11 18 5.5", "R 10.5 6 3 5.5 1.5"),
+        Icon::MouseRight => (
+            "R 6.5 3 11 18 5.5 M6.5 11 L17.5 11 M12 3 L12 11",
+            "M12 3 L12 11 L17.5 11 L17.5 8.5 C17.5 5.5 15 3 12 3 Z",
+        ),
     }
 }
 
@@ -381,17 +390,26 @@ pub const ALL: [Icon; COUNT] = [
     Icon::More,
     Icon::Chevron,
     Icon::ChevronUp,
+    Icon::MouseWheel,
+    Icon::MouseRight,
 ];
 
 /// Draw `icon` centered on `center`, fitted to a `size` x `size` box.
 pub fn draw(c: &mut Canvas, icon: Icon, center: Pt, size: f32, color: Color) {
+    draw_two_tone(c, icon, center, size, color, color);
+}
+
+/// Like [`draw`], with the filled part in its own colour (to point at one
+/// part of the icon, such as a mouse's wheel).
+pub fn draw_two_tone(c: &mut Canvas, icon: Icon, center: Pt, size: f32, line: Color, fill: Color) {
     let (stroke_path, fill_path) = &defs()[icon as usize];
     let k = size / 24.0;
     let ts =
         Transform::from_scale(k, k).post_translate(center.x - size / 2.0, center.y - size / 2.0);
     if let Some(p) = fill_path {
-        c.fill_path_ex(p, color, FillRule::Winding, ts);
+        c.fill_path_ex(p, fill, FillRule::Winding, ts);
     }
+    let color = line;
     if let Some(p) = stroke_path {
         let stroke = Stroke {
             // Keep strokes from getting hairline-thin on 1x displays.

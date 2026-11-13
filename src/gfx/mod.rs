@@ -242,6 +242,47 @@ impl<'a> Canvas<'a> {
         self
     }
 
+    /// Draw what `draw` paints as one layer with opacity `alpha`, moved by
+    /// (`dx`, `dy`): used to fade and slide things in as they appear.
+    /// Overlapping shapes inside the layer do not show through each other.
+    pub fn layer(&mut self, alpha: f32, dx: f32, dy: f32, draw: impl Fn(&mut Canvas)) {
+        let (ox, oy) = (self.ox, self.oy);
+        self.ox += dx;
+        self.oy += dy;
+        if self.is_measuring() || alpha >= 1.0 {
+            draw(self);
+        } else if alpha > 0.0 {
+            // Find what the layer covers, keep what is there, paint the
+            // layer, then mix the two.
+            let mut rects = Vec::new();
+            {
+                let mut m =
+                    Canvas::measure(self.w, self.h, &mut rects).with_offset(self.ox, self.oy);
+                draw(&mut m);
+            }
+            if let Some(area) = rects.iter().copied().reduce(|a, b| a.union(&b)) {
+                let w = self.w as usize;
+                let n = area.w as usize;
+                let mut behind = Vec::with_capacity(n * area.h as usize);
+                for y in area.y..area.bottom() {
+                    let o = y as usize * w + area.x as usize;
+                    behind.extend_from_slice(&self.buf[o..o + n]);
+                }
+                draw(self);
+                let k = (alpha * 256.0).round() as u32;
+                for (i, y) in (area.y..area.bottom()).enumerate() {
+                    let o = y as usize * w + area.x as usize;
+                    let row = &mut self.buf[o..o + n];
+                    for (d, b) in row.iter_mut().zip(&behind[i * n..(i + 1) * n]) {
+                        *d = lerp_px(*b, *d, k);
+                    }
+                }
+            }
+        }
+        self.ox = ox;
+        self.oy = oy;
+    }
+
     fn paint(c: Color) -> Paint<'static> {
         let mut p = Paint::default();
         // Buffer bytes are B,G,R,A - swap so tiny-skia writes the right channels.
@@ -779,6 +820,16 @@ fn shadow_sprite(r: RectF, radius: f32, spread: f32, strength: f32) -> Arc<Shado
     }
     map.insert(key, sprite.clone());
     sprite
+}
+
+/// `a` mixed towards `b` by `k`/256, every channel including alpha.
+#[inline]
+fn lerp_px(a: u32, b: u32, k: u32) -> u32 {
+    let ch = |s: u32| {
+        let (x, y) = ((a >> s) & 0xFF, (b >> s) & 0xFF);
+        ((x * (256 - k) + y * k) >> 8) << s
+    };
+    ch(24) | ch(16) | ch(8) | ch(0)
 }
 
 /// Rounded rectangle path (cubic corner approximation).

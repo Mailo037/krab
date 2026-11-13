@@ -66,7 +66,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 |---|---|
 | Rectangle, freeform, window and full-screen snips | yes |
 | Window snips leave out windows lying on top of the app | yes (Windows, macOS) |
-| Delayed snips (3 / 5 / 10 s, or any value from the command line) | yes |
+| Delayed snips (1 to 15 s from the timer button, or any value from the command line) | yes |
 | Pen, highlighter, eraser | yes |
 | Shapes: line, arrow, rectangle, ellipse | yes |
 | Text and callouts (speech bubbles pointing at something) | yes |
@@ -224,6 +224,7 @@ krab --text               # select a paragraph, its text is on the clipboard
 | `Alt` (tap) | colour magnifier on / off (remembered) |
 | `Esc` | cancel |
 | right click | menu: snip this window, the whole screen, copy the colour under the pointer |
+| wheel or right click on the timer | choose the delay (1, 3, 5, 10 or 15 s) |
 
 | After selecting | |
 |---|---|

@@ -32,8 +32,8 @@ All toolbar icons follow the same rules, so a new one fits in without anyone not
 | Stroke | 1.9 units, round caps, round joins - never thinner than 1.4 device px |
 | Corners | always rounded: rectangles 3 - 4 units, bends and arrow heads 1.5 - 2.6 units |
 | Ends | open lines end in round caps; no sharp points except where the meaning needs one (pen tip) |
-| Fill | only for solid states (stop, record dot) and for contrast inside a pair (pixelate) |
-| Colour | none - the icon is drawn in whatever colour the caller passes |
+| Fill | only for solid states (stop, record dot), for contrast inside a pair (pixelate) and for the part of a mouse a hint points at (wheel, right button) |
+| Colour | none - the icon is drawn in whatever colour the caller passes; `draw_two_tone` gives the filled part its own |
 | Detail | as little as still reads at 16 px; check the 1x rendering on the sheet |
 
 The roundness comes from three places: round caps and joins on every stroke, generous corner radii on

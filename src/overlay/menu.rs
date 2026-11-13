@@ -24,7 +24,12 @@ pub enum Item {
     Undo,
     StartOver,
     Cancel,
+    /// Wait this many seconds before snipping (the delay button's choices).
+    Delay(u32),
 }
+
+/// The waits the delay button offers.
+pub(super) const DELAY_STEPS: [u32; 5] = [1, 3, 5, 10, 15];
 
 pub(super) struct Menu {
     /// Where it was opened (local pixels).
@@ -37,6 +42,15 @@ pub(super) struct Menu {
     pub window: Option<Win>,
     /// The button that opened it: the menu hangs off its edges.
     pub anchor: Option<RectF>,
+    /// Counts the menus opened, so a menu that replaces another fades in too.
+    pub serial: u64,
+}
+
+impl Menu {
+    /// The choices of the delay button.
+    pub fn is_delay(&self) -> bool {
+        self.items.iter().any(|i| matches!(i, Some(Item::Delay(_))))
+    }
 }
 
 const ITEM_H: f32 = 30.0;
@@ -91,24 +105,23 @@ impl Overlay {
             items.push(Some(Item::StartOver));
         }
         items.push(Some(Item::Cancel));
-        self.menu = Some(Menu {
+        self.show_menu(Menu {
             at,
             items,
             hover: None,
             color,
             window,
             anchor: None,
+            serial: 0,
         });
-        self.hover_btn = None;
-        self.dirty = true;
     }
 
     /// The menu behind the "more" button, opened just off `anchor`.
     pub(super) fn open_more_menu(&mut self, anchor: RectF) {
         self.commit_text();
-        self.menu = Some(Menu {
-            at: Pt::new(anchor.x, anchor.bottom()),
-            items: vec![
+        self.show_menu(Self::button_menu(
+            anchor,
+            vec![
                 Some(Item::SaveAs),
                 Some(Item::Pin),
                 Some(Item::OpenExternal),
@@ -117,13 +130,62 @@ impl Overlay {
                 Some(Item::Redact),
                 Some(Item::Frame),
             ],
+        ));
+    }
+
+    /// The waits to choose from, opened off the delay button at `anchor`.
+    pub(super) fn open_delay_menu(&mut self, anchor: RectF) {
+        let mut steps = DELAY_STEPS.to_vec();
+        // A wait set in the config file is offered too.
+        if !steps.contains(&self.ui.delay) {
+            steps.push(self.ui.delay);
+            steps.sort_unstable();
+        }
+        let items = steps.into_iter().map(|n| Some(Item::Delay(n))).collect();
+        self.show_menu(Self::button_menu(anchor, items));
+    }
+
+    fn button_menu(anchor: RectF, items: Vec<Option<Item>>) -> Menu {
+        Menu {
+            at: Pt::new(anchor.x, anchor.bottom()),
+            items,
             hover: None,
             color: Color::BLACK,
             window: None,
             anchor: Some(anchor),
-        });
+            serial: 0,
+        }
+    }
+
+    fn show_menu(&mut self, mut menu: Menu) {
+        self.menu_serial += 1;
+        menu.serial = self.menu_serial;
+        self.menu = Some(menu);
         self.hover_btn = None;
         self.dirty = true;
+    }
+
+    /// Right click: the delay button offers its choices, anywhere else the
+    /// menu for what is under the pointer opens.
+    pub(super) fn context_click(&mut self) {
+        let slot = self
+            .bars()
+            .iter()
+            .flat_map(|b| b.slots.iter())
+            .find(|sl| sl.rect.contains(self.cursor))
+            .map(|sl| (sl.btn, sl.rect));
+        match slot {
+            Some((super::Btn::Delay, r)) => {
+                // A second right click on the button closes its menu again.
+                if self.menu.as_ref().is_some_and(|m| m.is_delay()) {
+                    self.menu = None;
+                    self.dirty = true;
+                } else {
+                    self.open_delay_menu(r);
+                }
+            }
+            _ => self.open_menu(),
+        }
     }
 
     fn label(&self, menu: &Menu, item: Item) -> String {
@@ -149,11 +211,23 @@ impl Overlay {
             Item::Undo => "Undo".into(),
             Item::StartOver => "Select again".into(),
             Item::Cancel => "Close".into(),
+            Item::Delay(1) => "1 second".into(),
+            Item::Delay(n) => format!("{n} seconds"),
+        }
+    }
+
+    /// The icon in front of an entry; a choice shows a tick when it is the
+    /// current one and nothing otherwise.
+    fn entry_icon(&self, item: Item) -> Option<Icon> {
+        match item {
+            Item::Delay(n) => (n == self.ui.delay).then_some(Icon::Check),
+            _ => Some(Self::icon(item)),
         }
     }
 
     fn icon(item: Item) -> Icon {
         match item {
+            Item::Delay(_) => Icon::Check,
             Item::Copy => Icon::Copy,
             Item::SaveAs => Icon::Save,
             Item::ExtractText => Icon::TextScan,
@@ -223,7 +297,7 @@ impl Overlay {
             let w = 36.0 * s + face.measure(&self.label(menu, *item), em) + 24.0 * s + keys;
             width = width.max(w);
         }
-        width = width.max(200.0 * s);
+        width = width.max(if menu.is_delay() { 150.0 } else { 200.0 } * s);
         let height: f32 = 2.0 * PAD * s
             + menu
                 .items
@@ -314,6 +388,7 @@ impl Overlay {
             Item::Undo => self.undo(),
             Item::StartOver => self.clear_selection(),
             Item::Cancel => self.outcome = Some(Outcome::Cancel),
+            Item::Delay(n) => self.ui.delay = n,
         }
     }
 
@@ -362,8 +437,8 @@ impl Overlay {
                     4.0 * s,
                     menu.color,
                 );
-            } else {
-                icons::draw(c, Self::icon(*item), icon_c, 16.0 * s, theme::ICON);
+            } else if let Some(icon) = self.entry_icon(*item) {
+                icons::draw(c, icon, icon_c, 16.0 * s, theme::ICON);
             }
             let label = self.label(menu, *item);
             face.draw(
