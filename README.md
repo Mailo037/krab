@@ -19,13 +19,17 @@ The name is a nod to [Ferris](https://rustacean.net/), the Rust crab, plus *grab
 | Cold start (`krab` with nothing running) to overlay | **about 70 ms** |
 | Handing a request to the background instance | under 1 ms |
 | Idle memory of the background instance | 14 MB working set, 2.4 MB private |
+| A frame of the overlay on a 4K display while moving the mouse | about 3.5 ms |
 | Download | one 2.3 MB executable |
 
-Measured on Windows 11 with a single 1920x1080 display. Most of the time is the screen grab itself.
-Run `krab --trace` to see the numbers on your machine.
+Measured on Windows 11 with a single 1920x1080 display (the frame time on a 3840x2160 overlay). Most of the
+time is the screen grab itself. Run `krab --trace` to see the numbers on your machine.
 
 Krab draws everything itself on the CPU, grabs the screen while its window is still opening and keeps that
-window ready in the background, so there is nothing to warm up.
+window ready in the background, so there is nothing to warm up. While you select and draw, only the parts of
+the screen that change are repainted and handed to the system, and finished markup is kept rendered, so even
+a 4K overlay with a lot of markup follows the mouse without effort. A copied snip is on the clipboard at once;
+the PNG rendition that some programs prefer is added a moment later in the background.
 
 ## What it looks like
 
@@ -65,16 +69,26 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Delayed snips (3 / 5 / 10 s, or any value from the command line) | yes |
 | Pen, highlighter, eraser | yes |
 | Shapes: line, arrow, rectangle, ellipse | yes |
-| Text | yes |
-| Pixelate / redact | yes |
-| Colour picker with pixel loupe (copies the hex value) | yes |
+| Text and callouts (speech bubbles pointing at something) | yes |
+| Step numbers (1, 2, 3...) for instructions | yes |
+| Measuring: distances in pixels, with width and height | yes |
+| Pixelate and blur | yes |
+| Hide personal data: e-mail addresses, phone, card and IBAN numbers, IP addresses and API keys are found and covered | yes - uses text extraction |
+| Background frame: padding, rounded corners and a shadow on a gradient | yes |
+| Colour picker with pixel loupe (copies HEX, RGB or HSL) | yes |
 | Crop after selecting (move and resize handles, arrow keys) | yes |
 | Undo / redo | yes, for markup and for moving / resizing the selection |
 | Copy to clipboard | yes |
 | Save as PNG, JPEG, BMP or GIF | yes |
 | Automatic save to `Pictures/Screenshots` | yes |
 | Text extraction (OCR) and QR codes | yes - see notes below |
-| Screen recording | yes, MP4 with ffmpeg or GIF without - no audio |
+| Copy text from screen: select an area, its text is on the clipboard | yes (`Alt+Shift+T`, `krab --text`) |
+| Scrolling capture: one tall image of a long page | yes - Krab scrolls by itself on Windows, elsewhere you scroll |
+| Pin a snip to the screen (always on top, zoomable) | yes |
+| Recent snips in the tray menu | yes |
+| Screen recording | yes, MP4 with ffmpeg (encoded on the graphics card when possible) or GIF without |
+| Sound in recordings: what the computer plays and / or the microphone | yes, MP4 only - see notes below |
+| Pause and resume a recording; mouse pointer and click highlights | yes |
 | Open the snip in another app | yes (system default app) |
 | Tray / menu bar icon and start with the system | yes |
 | Global shortcuts for snips and recording, changeable in the settings | yes (Linux: on X11) |
@@ -84,7 +98,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Command line and scripting | yes |
 | Automatic updates | yes |
 
-Not included: audio in recordings, the share sheet, printing, and HDR colour correction.
+Not included: the share sheet, printing, and HDR colour correction.
 
 ## Install
 
@@ -136,7 +150,15 @@ settings. Screen capture on Wayland uses PipeWire 1.0 or newer.
 [`tesseract`](https://github.com/tesseract-ocr/tesseract) if it is installed. QR codes are decoded by Krab itself
 on every platform.
 
-**Recording** writes H.264 MP4 when `ffmpeg` is on your `PATH`, and animated GIF otherwise.
+**Recording** writes H.264 MP4 when `ffmpeg` is on your `PATH`, and animated GIF otherwise. Krab tries the
+graphics card's encoder first (NVIDIA NVENC, Intel Quick Sync, AMD AMF, Apple VideoToolbox) and falls back to
+x264; `record_encoder = "software"` always uses x264. Sound (`record_audio`) is recorded on Windows straight
+from the system (what plays, the microphone, or both); on Linux ffmpeg reads PulseAudio / PipeWire, on macOS
+only the microphone is available. The mouse pointer appears in recordings on Windows.
+
+**Scrolling capture** turns the mouse wheel by itself on Windows and stops at the end of the page; on macOS
+and Linux, scroll the area yourself and click *Done*. Rows that do not move (sticky headers and footers)
+appear once.
 
 ## Updates
 
@@ -168,6 +190,8 @@ OPTIONS:
     -c, --copy                 copy as soon as the area is selected
     -e, --edit                 always open the markup tools after selecting
     -o, --output <FILE>        also save the result to FILE (png, jpg, bmp, gif)
+    -t, --text                 copy the text in the selected area
+        --scroll               scrolling capture of the selected area
         --now                  capture the full screen right now, no overlay
         --standalone           do not reuse the background instance
 
@@ -189,6 +213,7 @@ krab window --copy        # click a window, it is on the clipboard immediately
 krab full --now -o a.png  # scripted full-screen capture, no UI at all
 krab --delay 5            # five seconds to open that menu first
 krab --record             # choose an area and record it
+krab --text               # select a paragraph, its text is on the clipboard
 ```
 
 ### Keyboard and mouse
@@ -206,11 +231,21 @@ krab --record             # choose an area and record it
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo (markup, moving and resizing) |
 | `Ctrl+A` | select the whole screen |
 | `V` `P` `H` `L` `A` `R` `E` `T` `B` `X` `I` | move, pen, highlighter, line, arrow, rectangle, ellipse, text, pixelate, eraser, colour picker |
+| `K` `N` `M` `G` | callout, step number, measure, blur |
+| `F` | background frame on / off |
+| `Ctrl+T` | pin to the screen |
 | arrow keys (`Shift` = 10 px, `Ctrl` = resize) | nudge the selection |
 | `Shift` while drawing | straight strokes, 45 degree lines, squares and circles |
 | mouse wheel | stroke size |
 | `Esc` | step back (a drag in progress, text, then selection, then close) |
-| right click | menu: copy, save, copy text, copy colour, select the window under the pointer, undo |
+| right click | menu: copy, save, pin, copy text, hide personal data, copy colour (HEX, RGB, HSL), select the window under the pointer, undo |
+
+| Pinned snip | |
+|---|---|
+| drag | move it |
+| mouse wheel | zoom (snaps back to 100 %) |
+| `Ctrl+C` / `Ctrl+S` | copy / save as... |
+| double click, `Esc` or the `x` | close |
 
 On macOS use `Cmd` instead of `Ctrl`.
 
@@ -228,6 +263,7 @@ another one or clear it with the `x` button.
 hotkey = "PrintScreen"
 hotkey_alt = "Alt+Shift+S"
 hotkey_record = "Alt+Shift+V"     # start / stop a screen recording
+hotkey_text = "Alt+Shift+T"       # copy the text in an area
 run_in_background = true       # stay in the tray after the first snip
 default_mode = "rect"          # rect | freeform | window | full
 after_capture = "edit"         # "edit" = annotate in place, "copy" = copy immediately
@@ -243,7 +279,15 @@ border_width = 2
 loupe = true
 delay_seconds = 3
 record_fps = 30
+record_audio = "off"           # off | system | mic | both (MP4, needs ffmpeg)
+record_cursor = true           # show the mouse pointer in recordings
+record_clicks = false          # highlight the pointer and its clicks
+record_encoder = "auto"        # auto = graphics card when possible | software
 color = "#FF3B30"
+color_format = "hex"           # what the colour picker copies: hex | rgb | hsl
+history = true                 # recent snips in the tray menu
+frame = false                  # put every snip on a background
+frame_colors = "#F46623, #7B2FF7"
 auto_update = true             # install new versions automatically
 ```
 
