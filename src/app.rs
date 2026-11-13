@@ -142,6 +142,8 @@ pub struct App {
     pool: Vec<PoolWin>,
     huds: Vec<HudWin>,
     mods: Mods,
+    /// Alt went down on its own in an overlay; releasing it toggles the loupe.
+    alt_tap: bool,
     /// A capture thread is running.
     capturing: bool,
     /// Countdown before a delayed capture.
@@ -203,6 +205,7 @@ pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
         pool: Vec::new(),
         huds: Vec::new(),
         mods: Mods::default(),
+        alt_tap: false,
         capturing,
         delay: None,
         settle: None,
@@ -1230,6 +1233,7 @@ impl App {
                     MouseButton::Right => Button::Right,
                     _ => return,
                 };
+                self.alt_tap = false;
                 let win = &mut session.wins[idx];
                 // Use the position that belongs to this click (see
                 // `message_cursor_pos`), not the last move event seen.
@@ -1262,7 +1266,40 @@ impl App {
                 }
                 return;
             }
+            WindowEvent::Focused(false) => {
+                self.alt_tap = false;
+                return;
+            }
+            // Tapping Alt on its own shows or hides the pixel magnifier.
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } if event.logical_key == WinitKey::Named(NamedKey::Alt) => {
+                if event.state == ElementState::Pressed {
+                    if !event.repeat {
+                        self.alt_tap = !self.mods.ctrl && !self.mods.shift;
+                    }
+                    return;
+                }
+                // Releases made up when the window loses focus (Alt+Tab) don't count.
+                if !std::mem::take(&mut self.alt_tap) || is_synthetic {
+                    return;
+                }
+                self.cfg.loupe = !self.cfg.loupe;
+                for win in &mut session.wins {
+                    win.overlay.set_loupe(self.cfg.loupe);
+                }
+                if let Some(sw) = &mut self.settings {
+                    sw.ui.cfg.loupe = self.cfg.loupe;
+                    sw.window.request_redraw();
+                }
+                if let Err(e) = self.cfg.save() {
+                    eprintln!("krab: could not save the settings: {e}");
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.alt_tap = false;
                 target = key_target;
                 let ov = &mut session.wins[target].overlay;
                 let key = match &event.logical_key {

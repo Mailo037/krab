@@ -69,9 +69,12 @@ pub enum Icon {
     Frame,
     History,
     Scroll,
+    More,
+    Chevron,
+    ChevronUp,
 }
 
-const COUNT: usize = Icon::Scroll as usize + 1;
+const COUNT: usize = Icon::ChevronUp as usize + 1;
 
 /// (stroked geometry, filled geometry)
 pub fn source(icon: Icon) -> (&'static str, &'static str) {
@@ -185,6 +188,9 @@ pub fn source(icon: Icon) -> (&'static str, &'static str) {
         Icon::Frame => ("R 3 4 18 16 4 R 7 8 10 8 2", ""),
         Icon::History => ("P 2 3.5 9 3.5 4.5 8 4.5 M4.2 9 C5.8 5.6 9.3 3.8 12.7 4.3 C17 4.8 20.2 8.6 19.9 12.9 C19.6 17.2 15.9 20.4 11.6 20.2 C8.4 20 5.6 17.9 4.6 14.9 P 1.4 12 8 12 12.3 15 14", ""),
         Icon::Scroll => ("R 6 3.5 12 17 3 P 2 9.5 9 12 6.5 14.5 9 P 2 9.5 15 12 17.5 14.5 15", ""),
+        Icon::More => ("", "O 5.5 12 1.9 O 12 12 1.9 O 18.5 12 1.9"),
+        Icon::Chevron => ("P 1.6 6.5 9.5 12 15 17.5 9.5", ""),
+        Icon::ChevronUp => ("P 1.6 6.5 14.5 12 9 17.5 14.5", ""),
     }
 }
 
@@ -372,6 +378,9 @@ pub const ALL: [Icon; COUNT] = [
     Icon::Frame,
     Icon::History,
     Icon::Scroll,
+    Icon::More,
+    Icon::Chevron,
+    Icon::ChevronUp,
 ];
 
 /// Draw `icon` centered on `center`, fitted to a `size` x `size` box.

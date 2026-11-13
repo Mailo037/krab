@@ -720,17 +720,78 @@ fn toolbar_buttons_are_clickable_and_stay_on_screen() {
         let main = bars.main.as_ref().unwrap();
         let props = bars.props.as_ref().unwrap();
         assert!(main.rect.intersect(&props.rect).is_empty(), "bars overlap");
-        // Clicking the arrow tool through real pointer events selects it.
-        let arrow = main
-            .slots
-            .iter()
-            .find(|s| s.btn == Btn::Tool(Tool::Arrow))
-            .unwrap()
-            .rect
-            .center();
+        // The tools button opens the palette; picking the arrow selects it
+        // and closes the palette again.
+        let tools = slot_center(main, Btn::Tools);
+        click(&mut o, (tools.x, tools.y));
+        let bars = o.bars();
+        assert!(
+            bars.props.is_none(),
+            "the palette takes the props bar's place"
+        );
+        let palette = bars.palette.first().expect("palette open");
+        assert!(
+            main.rect.intersect(&palette.rect).is_empty(),
+            "bars overlap"
+        );
+        assert!(palette.rect.x >= 0.0 && palette.rect.right() <= 1600.0);
+        assert!(palette.rect.y >= 0.0 && palette.rect.bottom() <= 900.0);
+        let arrow = slot_center(palette, Btn::Tool(Tool::Arrow));
         click(&mut o, (arrow.x, arrow.y));
         assert_eq!(o.tool(), Tool::Arrow);
+        assert!(o.bars().palette.is_empty());
     }
+}
+
+fn slot_center(bar: &super::layout::Bar, btn: Btn) -> Pt {
+    bar.slots
+        .iter()
+        .find(|s| s.btn == btn)
+        .unwrap()
+        .rect
+        .center()
+}
+
+#[test]
+fn clicking_beside_the_palette_only_closes_it() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (500.0, 350.0));
+    o.activate(Btn::Tool(Tool::Pen));
+    o.activate(Btn::Tools);
+    assert!(!o.bars().palette.is_empty());
+    let before = o.annotations.len();
+    drag(&mut o, (200.0, 200.0), (300.0, 260.0));
+    assert!(o.bars().palette.is_empty());
+    assert_eq!(
+        o.annotations.len(),
+        before,
+        "no stroke from the closing click"
+    );
+    o.activate(Btn::Tools);
+    o.key(Key::Escape);
+    assert!(o.bars().palette.is_empty());
+    assert!(
+        o.has_selection(),
+        "Esc closes the palette before the selection"
+    );
+}
+
+#[test]
+fn more_button_opens_the_save_menu() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (500.0, 350.0));
+    let bars = o.bars();
+    let more = slot_center(bars.main.as_ref().unwrap(), Btn::More);
+    click(&mut o, (more.x, more.y));
+    let menu = o.menu.as_ref().expect("menu open");
+    assert!(menu.items.contains(&Some(super::menu::Item::SaveAs)));
+    let i = menu
+        .items
+        .iter()
+        .position(|it| *it == Some(super::menu::Item::Frame))
+        .unwrap();
+    o.run_menu(i);
+    assert!(o.opts.frame.is_some());
 }
 
 #[test]
@@ -1269,27 +1330,32 @@ fn text_and_scroll_requests_finish_on_selection() {
 }
 
 #[test]
-fn narrow_screens_get_a_two_row_toolbar() {
+fn narrow_screens_get_a_two_row_palette() {
     let mut o = overlay(Mode::Rect);
-    let (w, h) = (700u32, 800u32);
+    let (w, h) = (420u32, 800u32);
     o.px = vec![0xFF20_2020u32; (w * h) as usize];
     o.w = w;
     o.h = h;
-    drag(&mut o, (100.0, 100.0), (600.0, 400.0));
+    drag(&mut o, (60.0, 100.0), (360.0, 400.0));
+    o.activate(Btn::Tools);
     let bars = o.bars();
-    let second = bars.main2.as_ref().expect("a second row");
+    assert_eq!(bars.palette.len(), 2, "a second row");
     let main = bars.main.as_ref().unwrap();
-    for b in [main, second] {
+    for b in bars.iter() {
         assert!(
             b.rect.x >= 0.0 && b.rect.right() <= w as f32,
             "{:?}",
             b.rect
         );
     }
-    assert!(main.rect.intersect(&second.rect).is_empty());
-    // Every button is still reachable.
-    let count = main.slots.len() + second.slots.len();
-    assert_eq!(count, super::layout::tool_bar_len());
+    assert!(main.rect.intersect(&bars.palette[0].rect).is_empty());
+    assert!(bars.palette[0]
+        .rect
+        .intersect(&bars.palette[1].rect)
+        .is_empty());
+    // Every tool is still reachable.
+    let count: usize = bars.palette.iter().map(|b| b.slots.len()).sum();
+    assert_eq!(count, super::layout::palette_len());
 }
 
 #[test]
@@ -1358,4 +1424,52 @@ fn preview_new_tools() {
         image::ColorType::Rgba8,
     )
     .unwrap();
+}
+
+/// `KRAB_PREVIEW=out cargo test --lib preview_toolbar -- --ignored` writes
+/// out-closed.png, out-tools.png and out-more.png.
+#[test]
+#[ignore]
+fn preview_toolbar() {
+    let (w, h) = (1100u32, 720u32);
+    let mut o = overlay(Mode::Rect);
+    o.px = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            if (x / 40 + y / 40) % 2 == 0 {
+                0xFFF4_F5F7
+            } else {
+                0xFFE2_E5EA
+            }
+        })
+        .collect();
+    o.w = w;
+    o.h = h;
+    drag(&mut o, (150.0, 80.0), (950.0, 470.0));
+    o.activate(Btn::Tool(Tool::Arrow));
+    drag(&mut o, (300.0, 300.0), (500.0, 200.0));
+    let base = std::env::var("KRAB_PREVIEW").unwrap_or_else(|_| "preview".into());
+    let shoot = |o: &mut Overlay, name: &str| {
+        let mut buf = vec![0u32; (w * h) as usize];
+        o.render(&mut buf, w, h);
+        image::save_buffer(
+            format!("{base}-{name}.png"),
+            &crate::gfx::argb_to_rgba(&buf),
+            w,
+            h,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    };
+    o.pointer_moved(1050.0, 680.0);
+    shoot(&mut o, "closed");
+    let tools = slot_center(o.bars().main.as_ref().unwrap(), Btn::Tools);
+    click(&mut o, (tools.x, tools.y));
+    let pen = slot_center(&o.bars().palette[0], Btn::Tool(Tool::Pen));
+    o.pointer_moved(pen.x, pen.y);
+    shoot(&mut o, "tools");
+    o.key(Key::Escape);
+    let more = slot_center(o.bars().main.as_ref().unwrap(), Btn::More);
+    click(&mut o, (more.x, more.y));
+    shoot(&mut o, "more");
 }

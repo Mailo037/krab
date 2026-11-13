@@ -526,7 +526,7 @@ impl Overlay {
         if self.cursor_inside
             && !f.over_bar
             && self.menu.is_none()
-            && (picking || resizing || (selecting && self.opts.loupe))
+            && (picking || ((selecting || resizing) && self.opts.loupe))
         {
             self.draw_loupe(c);
         }
@@ -704,11 +704,26 @@ impl Overlay {
         };
 
         let label = self.btn_label(btn);
-        let icon_x = if label.is_some() {
+        let icon_x = if label.is_some() || btn == Btn::Tools {
             r.x + theme::BTN * s / 2.0
         } else {
             center.x
         };
+        if btn == Btn::Tools {
+            // Small arrow: this button opens the tool palette.
+            let chevron = if self.palette {
+                icons::Icon::ChevronUp
+            } else {
+                icons::Icon::Chevron
+            };
+            icons::draw(
+                c,
+                chevron,
+                Pt::new(r.right() - 9.0 * s, center.y),
+                11.0 * s,
+                ink,
+            );
+        }
         if let Some(icon) = self.btn_icon(btn) {
             icons::draw(
                 c,

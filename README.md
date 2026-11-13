@@ -221,6 +221,7 @@ krab --text               # select a paragraph, its text is on the clipboard
 | While selecting | |
 |---|---|
 | `R` `F` `W` `M` | rectangle, freeform, window, full screen (monitor) |
+| `Alt` (tap) | colour magnifier on / off (remembered) |
 | `Esc` | cancel |
 | right click | menu: snip this window, the whole screen, copy the colour under the pointer |
 
@@ -276,7 +277,7 @@ notifications = true
 border = false
 border_color = "#F46623"
 border_width = 2
-loupe = true
+loupe = true                   # colour magnifier while selecting (tap Alt to toggle)
 delay_seconds = 3
 record_fps = 30
 record_audio = "off"           # off | system | mic | both (MP4, needs ffmpeg)

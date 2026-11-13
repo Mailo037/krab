@@ -155,7 +155,13 @@ impl Toggle {
             Toggle::AutoSave => "Save every snip automatically",
             Toggle::Notifications => "Show a confirmation",
             Toggle::Border => "Draw a border around snips",
-            Toggle::Loupe => "Pixel magnifier while selecting",
+            Toggle::Loupe => {
+                if cfg!(target_os = "macos") {
+                    "Colour magnifier (tap Option to toggle)"
+                } else {
+                    "Colour magnifier (tap Alt to toggle)"
+                }
+            }
             Toggle::Background => {
                 if cfg!(target_os = "macos") {
                     "Keep running in the menu bar"

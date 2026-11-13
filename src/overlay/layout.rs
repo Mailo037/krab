@@ -24,6 +24,8 @@ pub(super) struct Bars {
     /// Second row of the toolbar on screens too narrow for one.
     pub main2: Option<Bar>,
     pub props: Option<Bar>,
+    /// The open tool palette (one row, or two on narrow screens).
+    pub palette: Vec<Bar>,
     /// The main bar sits above the selection (affects label placement).
     pub above: bool,
 }
@@ -34,6 +36,7 @@ impl Bars {
             .iter()
             .chain(self.main2.iter())
             .chain(self.props.iter())
+            .chain(self.palette.iter())
     }
 
     pub fn hit(&self, p: Pt) -> Option<Btn> {
@@ -62,7 +65,22 @@ const MODE_BAR: &[Option<Btn>] = &[
     Some(Btn::Cancel),
 ];
 
+/// The toolbar once an area is selected: markup tools and the save options
+/// each sit behind one button.
 const TOOL_BAR: &[Option<Btn>] = &[
+    Some(Btn::Tools),
+    None,
+    Some(Btn::Undo),
+    Some(Btn::Redo),
+    None,
+    Some(Btn::More),
+    None,
+    Some(Btn::Copy),
+    Some(Btn::Cancel),
+];
+
+/// The markup tools, opened from [`Btn::Tools`].
+const PALETTE: &[Option<Btn>] = &[
     Some(Btn::Tool(Tool::Select)),
     Some(Btn::Tool(Tool::Pen)),
     Some(Btn::Tool(Tool::Highlighter)),
@@ -71,6 +89,7 @@ const TOOL_BAR: &[Option<Btn>] = &[
     Some(Btn::Tool(Tool::Rect)),
     Some(Btn::Tool(Tool::Ellipse)),
     Some(Btn::Tool(Tool::Text)),
+    None,
     Some(Btn::Tool(Tool::Callout)),
     Some(Btn::Tool(Tool::Step)),
     Some(Btn::Tool(Tool::Measure)),
@@ -79,25 +98,12 @@ const TOOL_BAR: &[Option<Btn>] = &[
     Some(Btn::Tool(Tool::Blur)),
     Some(Btn::Tool(Tool::Eraser)),
     Some(Btn::Tool(Tool::Pipette)),
-    None,
-    Some(Btn::Undo),
-    Some(Btn::Redo),
-    None,
-    Some(Btn::Ocr),
-    Some(Btn::Redact),
-    Some(Btn::Frame),
-    Some(Btn::Pin),
-    Some(Btn::Open),
-    Some(Btn::Save),
-    None,
-    Some(Btn::Copy),
-    Some(Btn::Cancel),
 ];
 
-/// Number of buttons on the markup toolbar.
+/// Number of buttons in the tool palette.
 #[cfg(test)]
-pub(super) fn tool_bar_len() -> usize {
-    TOOL_BAR.iter().flatten().count()
+pub(super) fn palette_len() -> usize {
+    PALETTE.iter().flatten().count()
 }
 
 const PROPS_BAR: &[Option<Btn>] = &[
@@ -149,14 +155,13 @@ impl Overlay {
             },
             Btn::Undo => Icon::Undo,
             Btn::Redo => Icon::Redo,
-            Btn::Ocr => Icon::TextScan,
             Btn::Redact => Icon::Redact,
             Btn::Frame => Icon::Frame,
-            Btn::Pin => Icon::Pin,
-            Btn::Open => Icon::External,
-            Btn::Save => Icon::Save,
             Btn::Copy => Icon::Copy,
             Btn::Record => Icon::Dot,
+            // The tools button shows the tool in use.
+            Btn::Tools => return self.btn_icon(Btn::Tool(self.tool)),
+            Btn::More => Icon::More,
             Btn::Color(_) | Btn::Width(_) => return None,
         })
     }
@@ -199,14 +204,12 @@ impl Overlay {
             .into(),
             Btn::Undo => "Undo   Ctrl+Z".into(),
             Btn::Redo => "Redo   Ctrl+Y".into(),
-            Btn::Ocr => "Copy text / QR code".into(),
             Btn::Redact => "Hide e-mails, numbers and keys".into(),
             Btn::Frame => "Background frame   F".into(),
-            Btn::Pin => "Pin to screen   Ctrl+T".into(),
-            Btn::Open => "Open in default app".into(),
-            Btn::Save => "Save as...   Ctrl+S".into(),
             Btn::Copy => "Copy   Enter".into(),
             Btn::Record => "Start recording   Enter".into(),
+            Btn::Tools => "Markup tools".into(),
+            Btn::More => "Save, pin, text and more".into(),
             Btn::Color(i) => theme::PALETTE[i as usize].to_hex_string(),
             Btn::Width(i) => ["Small", "Medium", "Large"][i as usize].into(),
         }
@@ -217,6 +220,8 @@ impl Overlay {
         match btn {
             Btn::Color(_) => 26.0 * s,
             Btn::Width(_) => 30.0 * s,
+            // Room for the small arrow next to the tool icon.
+            Btn::Tools => (theme::BTN + 12.0) * s,
             Btn::Delay | Btn::Record => {
                 let label = self.btn_label(btn).unwrap_or_default();
                 let pad = if btn == Btn::Record { 14.0 } else { 6.0 };
@@ -284,6 +289,7 @@ impl Overlay {
                 main: Some(bar),
                 main2: None,
                 props: None,
+                palette: Vec::new(),
                 above: false,
             };
         };
@@ -299,9 +305,9 @@ impl Overlay {
         let block_h = rows.len() as f32 * mh + (rows.len() - 1) as f32 * row_gap;
         let props_h = 26.0 * s;
         let (pw, ph) = self.bar_size(PROPS_BAR, props_h);
-        // Always reserve room for the properties bar so the toolbar does not
-        // jump when switching between tools.
-        let reserve = if record { 0.0 } else { ph + gap * 0.75 };
+        // Always reserve room for the properties bar or the tool palette so
+        // the toolbar does not jump when one of them opens.
+        let reserve = if record { 0.0 } else { mh + gap * 0.75 };
 
         let r = sel.rect;
         let below_y = r.bottom() + gap;
@@ -327,7 +333,30 @@ impl Overlay {
         let main2 = rows.get(1).map(|row| place(row, my + mh + row_gap));
         let mx = main.rect.x;
 
-        let props = (!record && self.tool.has_style()).then(|| {
+        // The palette and the properties bar share the spot next to the toolbar.
+        let mut palette = Vec::new();
+        if !record && self.palette {
+            let anchor = main
+                .slots
+                .iter()
+                .find(|sl| sl.btn == Btn::Tools)
+                .map_or(mx, |sl| sl.rect.x - theme::BAR_PAD * s);
+            let prows = self.split_rows(PALETTE, btn_h, sw - 2.0 * margin);
+            let n = prows.len() as f32;
+            let first_y = if props_below {
+                my + block_h + gap * 0.75
+            } else {
+                my - gap * 0.75 - n * mh - (n - 1.0) * row_gap
+            };
+            for (i, row) in prows.iter().enumerate() {
+                let (w, _) = self.bar_size(row, btn_h);
+                let x = anchor.clamp(margin, (sw - w - margin).max(margin));
+                let y = (first_y + i as f32 * (mh + row_gap))
+                    .clamp(margin, (sh - mh - margin).max(margin));
+                palette.push(self.build_bar(row, x, y, btn_h));
+            }
+        }
+        let props = (!record && palette.is_empty() && self.tool.has_style()).then(|| {
             let py = if props_below {
                 my + block_h + gap * 0.75
             } else {
@@ -340,6 +369,7 @@ impl Overlay {
             main: Some(main),
             main2,
             props,
+            palette,
             above,
         }
     }

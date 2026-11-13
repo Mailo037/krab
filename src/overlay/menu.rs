@@ -15,6 +15,7 @@ pub enum Item {
     StartRecording,
     Pin,
     Redact,
+    Frame,
     CopyColor,
     CopyColorRgb,
     CopyColorHsl,
@@ -34,6 +35,8 @@ pub(super) struct Menu {
     pub color: Color,
     /// Window under the pointer when the menu opened.
     pub window: Option<Win>,
+    /// The button that opened it: the menu hangs off its edges.
+    pub anchor: Option<RectF>,
 }
 
 const ITEM_H: f32 = 30.0;
@@ -94,6 +97,30 @@ impl Overlay {
             hover: None,
             color,
             window,
+            anchor: None,
+        });
+        self.hover_btn = None;
+        self.dirty = true;
+    }
+
+    /// The menu behind the "more" button, opened just off `anchor`.
+    pub(super) fn open_more_menu(&mut self, anchor: RectF) {
+        self.commit_text();
+        self.menu = Some(Menu {
+            at: Pt::new(anchor.x, anchor.bottom()),
+            items: vec![
+                Some(Item::SaveAs),
+                Some(Item::Pin),
+                Some(Item::OpenExternal),
+                None,
+                Some(Item::ExtractText),
+                Some(Item::Redact),
+                Some(Item::Frame),
+            ],
+            hover: None,
+            color: Color::BLACK,
+            window: None,
+            anchor: Some(anchor),
         });
         self.hover_btn = None;
         self.dirty = true;
@@ -109,6 +136,8 @@ impl Overlay {
             Item::StartRecording => "Start recording".into(),
             Item::Pin => "Pin to screen".into(),
             Item::Redact => "Hide e-mails, numbers and keys".into(),
+            Item::Frame if self.opts.frame.is_some() => "Remove the background".into(),
+            Item::Frame => "Put on a background".into(),
             Item::CopyColor => format!("Copy colour {}", menu.color.to_hex_string()),
             Item::CopyColorRgb => format!("Copy {}", menu.color.to_rgb_string()),
             Item::CopyColorHsl => format!("Copy {}", menu.color.to_hsl_string()),
@@ -132,6 +161,7 @@ impl Overlay {
             Item::StartRecording => Icon::Video,
             Item::Pin => Icon::Pin,
             Item::Redact => Icon::Redact,
+            Item::Frame => Icon::Frame,
             Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl => Icon::Pipette,
             Item::SnipWindow => Icon::ModeWindow,
             Item::SnipScreen => Icon::ModeFull,
@@ -171,6 +201,7 @@ impl Overlay {
                 }
             }
             Item::Cancel => &["Esc"],
+            Item::Frame => &["F"],
             _ => &[],
         }
     }
@@ -203,13 +234,18 @@ impl Overlay {
         let b = self.bounds();
         let margin = 6.0 * s;
         // Open to the right and below; flip when that would leave the screen.
-        let mut x = menu.at.x + 2.0 * s;
+        // A menu opened from a button flips around the button, not the point.
+        let a = menu
+            .anchor
+            .unwrap_or(RectF::new(menu.at.x, menu.at.y, 0.0, 0.0));
+        let gap = if menu.anchor.is_some() { 6.0 } else { 2.0 } * s;
+        let mut x = a.x + 2.0 * s;
         if x + width > b.right() - margin {
-            x = menu.at.x - width - 2.0 * s;
+            x = a.right() - width - 2.0 * s;
         }
-        let mut y = menu.at.y + 2.0 * s;
+        let mut y = a.bottom() + gap;
         if y + height > b.bottom() - margin {
-            y = menu.at.y - height - 2.0 * s;
+            y = a.y - height - gap;
         }
         let x = x.clamp(margin, (b.right() - width - margin).max(margin));
         let y = y.clamp(margin, (b.bottom() - height - margin).max(margin));
@@ -259,6 +295,7 @@ impl Overlay {
             Item::StartRecording => self.confirm(),
             Item::Pin => self.finish(Finish::Pin),
             Item::Redact => self.activate(super::Btn::Redact),
+            Item::Frame => self.activate(super::Btn::Frame),
             Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl => {
                 let text = match item {
                     Item::CopyColorRgb => menu.color.to_rgb_string(),

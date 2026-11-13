@@ -71,15 +71,14 @@ pub enum Btn {
     Tool(Tool),
     Undo,
     Redo,
-    Ocr,
+    /// Opens or closes the palette of markup tools.
+    Tools,
+    /// Opens the menu with save, pin, text and the like.
+    More,
     /// Cover e-mail addresses, phone numbers and the like.
     Redact,
     /// Put the snip on a background with padding and a shadow.
     Frame,
-    /// Keep the snip on screen in its own window.
-    Pin,
-    Open,
-    Save,
     Copy,
     Color(u8),
     Width(u8),
@@ -305,6 +304,8 @@ pub struct Overlay {
     cursor: Pt,
     cursor_inside: bool,
     mods: Mods,
+    /// The palette of markup tools is open.
+    palette: bool,
     hover_btn: Option<Btn>,
     hover_window: Option<RectI>,
     last_click: Option<(Instant, Pt)>,
@@ -386,6 +387,7 @@ impl Overlay {
             cursor: Pt::new(-1.0, -1.0),
             cursor_inside: false,
             mods: Mods::default(),
+            palette: false,
             hover_btn: None,
             hover_window: None,
             last_click: None,
@@ -494,6 +496,7 @@ impl Overlay {
         self.text_edit = None;
         self.drag = Drag::None;
         self.tool = Tool::Select;
+        self.palette = false;
         self.dirty = true;
     }
 
@@ -932,6 +935,14 @@ impl Overlay {
         self.mods = mods;
     }
 
+    /// Show or hide the pixel magnifier while selecting (tapping Alt toggles it).
+    pub fn set_loupe(&mut self, on: bool) {
+        if self.opts.loupe != on {
+            self.opts.loupe = on;
+            self.dirty = true;
+        }
+    }
+
     pub fn pointer_left(&mut self) {
         if self.cursor_inside {
             self.cursor_inside = false;
@@ -1049,6 +1060,11 @@ impl Overlay {
             return;
         }
         if bars.contains(p) {
+            return;
+        }
+        if std::mem::take(&mut self.palette) {
+            // A click next to the open palette only closes it.
+            self.swallow_release = true;
             return;
         }
         self.commit_text();
@@ -1423,6 +1439,8 @@ impl Overlay {
             self.draft = None;
         } else if self.text_edit.is_some() {
             self.commit_text();
+        } else if self.palette {
+            self.palette = false;
         } else if self.sel.is_some() {
             self.clear_selection();
         } else {
@@ -1561,6 +1579,7 @@ impl Overlay {
             _ => return,
         };
         self.tool = tool;
+        self.palette = false;
     }
 
     fn nudge(&mut self, key: Key) {
@@ -1625,6 +1644,7 @@ impl Overlay {
             Btn::Tool(t) => self.tool == t,
             Btn::Color(i) => theme::PALETTE[i as usize] == self.color,
             Btn::Frame => self.opts.frame.is_some(),
+            Btn::Tools => self.palette,
             Btn::Width(i) => self.width_idx == i as usize,
             _ => false,
         }
@@ -1658,10 +1678,10 @@ impl Overlay {
             Btn::Tool(t) => {
                 self.commit_text();
                 self.tool = t;
+                self.palette = false;
             }
             Btn::Undo => self.undo(),
             Btn::Redo => self.redo(),
-            Btn::Ocr => self.finish(Finish::ExtractText),
             Btn::Redact => {
                 self.commit_text();
                 if let Some(img) = self.compose_with(false) {
@@ -1680,9 +1700,21 @@ impl Overlay {
                     "No background"
                 });
             }
-            Btn::Pin => self.finish(Finish::Pin),
-            Btn::Open => self.finish(Finish::OpenExternal),
-            Btn::Save => self.finish(Finish::SaveAs),
+            Btn::Tools => {
+                self.commit_text();
+                self.palette = !self.palette;
+            }
+            Btn::More => {
+                let slot = self
+                    .bars()
+                    .iter()
+                    .flat_map(|b| b.slots.iter())
+                    .find(|sl| sl.btn == Btn::More)
+                    .map(|sl| sl.rect);
+                if let Some(r) = slot {
+                    self.open_more_menu(r);
+                }
+            }
             Btn::Copy => self.finish(Finish::Copy),
             Btn::Color(i) => self.color = theme::PALETTE[i as usize],
             Btn::Width(i) => self.width_idx = (i as usize).min(theme::WIDTHS.len() - 1),
