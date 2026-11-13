@@ -20,7 +20,7 @@ The name is a nod to [Ferris](https://rustacean.net/), the Rust crab, plus *grab
 | Handing a request to the background instance | under 1 ms |
 | Idle memory of the background instance | 14 MB working set, 2.4 MB private |
 | A frame of the overlay on a 4K display while moving the mouse | about 3.5 ms |
-| Download | one 2.3 MB executable |
+| Download | one 3.1 MB executable |
 
 Measured on Windows 11 with a single 1920x1080 display (the frame time on a 3840x2160 overlay). Most of the
 time is the screen grab itself. Run `krab --trace` to see the numbers on your machine.
