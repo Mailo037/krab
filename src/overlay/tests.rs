@@ -1125,3 +1125,208 @@ fn isolated_windows_render_incrementally_like_full_frames() {
     fc.step(&mut o, "screen restored");
     fc.moves(&mut o, (70.0, 60.0), (150.0, 100.0), "hovering again");
 }
+
+#[test]
+fn step_markers_count_up_and_callouts_take_text() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 400.0));
+    o.activate(Btn::Tool(Tool::Step));
+    click(&mut o, (100.0, 100.0));
+    click(&mut o, (200.0, 100.0));
+    let ns: Vec<u32> = o
+        .annotations
+        .iter()
+        .filter_map(|a| match a.shape {
+            Shape::Step { n, .. } => Some(n),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ns, [1, 2]);
+
+    o.activate(Btn::Tool(Tool::Callout));
+    drag(&mut o, (300.0, 300.0), (420.0, 200.0));
+    assert!(o.is_typing());
+    o.text_input("Here");
+    o.key(Key::Enter);
+    match &o.annotations.last().unwrap().shape {
+        Shape::Callout { tip, text, .. } => {
+            assert_eq!(*tip, Pt::new(300.0, 300.0));
+            assert_eq!(text, "Here");
+        }
+        other => panic!("expected a callout, got {other:?}"),
+    }
+    // An empty callout is dropped like empty text.
+    drag(&mut o, (310.0, 310.0), (320.0, 320.0));
+    o.key(Key::Enter);
+    assert_eq!(o.annotation_count(), 3);
+}
+
+#[test]
+fn measure_and_blur_leave_marks_in_the_output() {
+    let mut o = overlay(Mode::Rect);
+    // A fine checkerboard: blurring turns it grey.
+    o.px = (0..W * H)
+        .map(|i| {
+            if ((i % W) / 2 + (i / W) / 2) & 1 == 0 {
+                0xFF00_0000
+            } else {
+                0xFFFF_FFFF
+            }
+        })
+        .collect();
+    drag(&mut o, (20.0, 20.0), (600.0, 400.0));
+    let clean = o.compose().unwrap();
+    o.activate(Btn::Tool(Tool::Blur));
+    drag(&mut o, (100.0, 100.0), (200.0, 180.0));
+    o.activate(Btn::Tool(Tool::Measure));
+    drag(&mut o, (100.0, 300.0), (400.0, 300.0));
+    assert_eq!(o.annotation_count(), 2);
+    let marked = o.compose().unwrap();
+    assert_ne!(marked, clean);
+    let [r, g, b, _] = pixel(&marked, 130, 130);
+    assert!(
+        (100..156).contains(&r) && r == g && g == b,
+        "not blurred: {r}"
+    );
+    assert!([0, 255].contains(&pixel(&clean, 130, 130)[0]));
+}
+
+#[test]
+fn redactions_cover_the_reported_boxes() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (500.0, 400.0));
+    o.activate(Btn::Redact);
+    match o.take_outcome() {
+        Some(Outcome::Redact(img)) => assert_eq!((img.w, img.h), (400, 300)),
+        _ => panic!("expected a redaction request"),
+    }
+    o.apply_redactions(Ok(vec![RectF::new(10.0, 20.0, 50.0, 12.0)]));
+    let img = o.compose().unwrap();
+    assert_eq!(pixel(&img, 30, 25), [0x0B, 0x0B, 0x0D, 255]);
+    assert_ne!(pixel(&img, 5, 5), [0x0B, 0x0B, 0x0D, 255]);
+    o.undo();
+    assert_eq!(o.annotation_count(), 0);
+}
+
+#[test]
+fn frame_puts_the_snip_on_a_padded_background() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (300.0, 250.0));
+    o.activate(Btn::Frame);
+    let img = o.compose().unwrap();
+    assert!(img.w > 200 + 40 && img.h > 150 + 40, "{}x{}", img.w, img.h);
+    assert!(img.is_opaque());
+    o.activate(Btn::Frame);
+    assert_eq!(o.compose().unwrap().w, 200);
+}
+
+#[test]
+fn text_and_scroll_requests_finish_on_selection() {
+    let mut o = overlay(Mode::Rect);
+    o.opts.quick_text = true;
+    drag(&mut o, (100.0, 100.0), (300.0, 250.0));
+    assert!(matches!(
+        o.take_outcome(),
+        Some(Outcome::Finish(Finish::ExtractText, _))
+    ));
+
+    let mut o = overlay(Mode::Rect);
+    o.opts.scroll = true;
+    drag(&mut o, (100.0, 100.0), (300.0, 250.0));
+    match o.take_outcome() {
+        Some(Outcome::Scroll(r)) => assert_eq!(r, RectI::new(100, 100, 200, 150)),
+        _ => panic!("expected a scrolling capture"),
+    }
+}
+
+#[test]
+fn narrow_screens_get_a_two_row_toolbar() {
+    let mut o = overlay(Mode::Rect);
+    let (w, h) = (700u32, 800u32);
+    o.px = vec![0xFF20_2020u32; (w * h) as usize];
+    o.w = w;
+    o.h = h;
+    drag(&mut o, (100.0, 100.0), (600.0, 400.0));
+    let bars = o.bars();
+    let second = bars.main2.as_ref().expect("a second row");
+    let main = bars.main.as_ref().unwrap();
+    for b in [main, second] {
+        assert!(
+            b.rect.x >= 0.0 && b.rect.right() <= w as f32,
+            "{:?}",
+            b.rect
+        );
+    }
+    assert!(main.rect.intersect(&second.rect).is_empty());
+    // Every button is still reachable.
+    let count = main.slots.len() + second.slots.len();
+    assert_eq!(count, super::layout::tool_bar_len());
+}
+
+#[test]
+fn new_tools_render_incrementally_like_full_frames() {
+    let mut o = overlay(Mode::Rect);
+    let mut fc = FrameCheck::new(&mut o);
+    fc.drag(&mut o, (60.0, 60.0), (640.0, 460.0), "selection");
+    o.activate(Btn::Tool(Tool::Step));
+    o.pointer_moved(120.0, 120.0);
+    o.pointer_button(Button::Left, true);
+    o.pointer_button(Button::Left, false);
+    fc.step(&mut o, "step marker");
+    o.activate(Btn::Tool(Tool::Blur));
+    fc.drag(&mut o, (150.0, 150.0), (260.0, 240.0), "blur");
+    o.activate(Btn::Tool(Tool::Measure));
+    fc.drag(&mut o, (100.0, 400.0), (500.0, 330.0), "measure");
+    o.activate(Btn::Tool(Tool::Callout));
+    fc.drag(&mut o, (300.0, 300.0), (420.0, 200.0), "callout placed");
+    o.text_input("Callout text");
+    fc.step(&mut o, "typing a callout");
+    o.key(Key::Enter);
+    fc.step(&mut o, "callout committed");
+}
+
+/// `KRAB_PREVIEW=out.png cargo test --lib preview_new_tools -- --ignored`
+#[test]
+#[ignore]
+fn preview_new_tools() {
+    let mut o = overlay(Mode::Rect);
+    o.px = (0..W * H)
+        .map(|i| {
+            let (x, y) = (i % W, i / W);
+            if (x / 40 + y / 40) % 2 == 0 {
+                0xFFF4_F5F7
+            } else {
+                0xFFE2_E5EA
+            }
+        })
+        .collect();
+    drag(&mut o, (40.0, 40.0), (960.0, 560.0));
+    o.activate(Btn::Tool(Tool::Step));
+    click(&mut o, (120.0, 120.0));
+    click(&mut o, (200.0, 120.0));
+    o.activate(Btn::Color(4));
+    click(&mut o, (280.0, 120.0));
+    o.activate(Btn::Tool(Tool::Callout));
+    o.activate(Btn::Color(0));
+    drag(&mut o, (420.0, 300.0), (520.0, 160.0));
+    o.text_input("Click here first");
+    o.key(Key::Enter);
+    o.activate(Btn::Tool(Tool::Measure));
+    drag(&mut o, (120.0, 420.0), (620.0, 420.0));
+    drag(&mut o, (700.0, 220.0), (860.0, 480.0));
+    o.activate(Btn::Tool(Tool::Blur));
+    drag(&mut o, (120.0, 460.0), (400.0, 540.0));
+    o.apply_redactions(Ok(vec![RectF::new(500.0, 440.0, 160.0, 22.0)]));
+    o.pointer_moved(500.0, 700.0);
+    let mut buf = vec![0u32; (W * H) as usize];
+    o.render(&mut buf, W, H);
+    let path = std::env::var("KRAB_PREVIEW").unwrap_or_else(|_| "preview.png".into());
+    image::save_buffer(
+        &path,
+        &crate::gfx::argb_to_rgba(&buf),
+        W,
+        H,
+        image::ColorType::Rgba8,
+    )
+    .unwrap();
+}

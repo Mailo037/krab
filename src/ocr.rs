@@ -4,7 +4,31 @@
 //! offline). On macOS and Linux Krab shells out to `tesseract` if installed.
 //! QR codes are decoded in-process on every platform.
 
+use crate::geom::RectF;
 use crate::output::Image;
+
+/// A recognized word and where it is (image pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Word {
+    pub text: String,
+    pub rect: RectF,
+}
+
+/// The words of one line of text, left to right.
+pub type Line = Vec<Word>;
+
+fn lines_to_text(lines: &[Line]) -> String {
+    lines
+        .iter()
+        .map(|l| {
+            l.iter()
+                .map(|w| w.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Luma of a pixel, with transparency flattened onto white.
 fn luma(p: &[u8]) -> u8 {
@@ -34,7 +58,7 @@ pub fn read_qr_codes(img: &Image) -> Vec<String> {
 pub fn extract_text(img: &Image) -> Result<String, String> {
     let codes = read_qr_codes(img);
     let text = match recognize(img) {
-        Ok(t) => t,
+        Ok(lines) => lines_to_text(&lines),
         Err(e) if codes.is_empty() => return Err(e),
         Err(_) => String::new(),
     };
@@ -67,18 +91,19 @@ fn upscale_factor(w: u32, h: u32, max_dim: u32) -> u32 {
     }
 }
 
+/// Recognize the text in `img`, line by line, with word positions.
 #[cfg(windows)]
-fn recognize(img: &Image) -> Result<String, String> {
+pub fn recognize(img: &Image) -> Result<Vec<Line>, String> {
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;
     use windows::Storage::Streams::DataWriter;
 
-    let run = || -> windows::core::Result<String> {
+    let run = || -> windows::core::Result<Vec<Line>> {
         let max_dim = OcrEngine::MaxImageDimension()?;
         let k = upscale_factor(img.w, img.h, max_dim);
         let (w, h) = (img.w * k, img.h * k);
         if w > max_dim || h > max_dim {
-            return Ok(String::new());
+            return Ok(Vec::new());
         }
         // BGRA, flattened on white, nearest-neighbour upscaled.
         let mut bgra = Vec::with_capacity((w * h * 4) as usize);
@@ -103,29 +128,40 @@ fn recognize(img: &Image) -> Result<String, String> {
         )?;
         let engine = OcrEngine::TryCreateFromUserProfileLanguages()?;
         let result = engine.RecognizeAsync(&bitmap)?.get()?;
+        let kf = k as f32;
         let mut lines = Vec::new();
         for line in result.Lines()? {
-            lines.push(line.Text()?.to_string());
+            let mut words = Vec::new();
+            for word in line.Words()? {
+                let r = word.BoundingRect()?;
+                words.push(Word {
+                    text: word.Text()?.to_string(),
+                    rect: RectF::new(r.X / kf, r.Y / kf, r.Width / kf, r.Height / kf),
+                });
+            }
+            lines.push(words);
         }
-        Ok(lines.join("\n"))
+        Ok(lines)
     };
     run().map_err(|e| format!("Text recognition failed: {}", e.message()))
 }
 
+/// Recognize the text in `img`, line by line, with word positions.
 #[cfg(not(windows))]
-fn recognize(img: &Image) -> Result<String, String> {
+pub fn recognize(img: &Image) -> Result<Vec<Line>, String> {
     use std::process::{Command, Stdio};
     let path = std::env::temp_dir().join(format!("krab-ocr-{}.png", std::process::id()));
     img.save(&path, 100)?;
     let out = Command::new("tesseract")
         .arg(&path)
         .arg("stdout")
+        .arg("tsv")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();
     let _ = std::fs::remove_file(&path);
     match out {
-        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
+        Ok(o) if o.status.success() => Ok(parse_tsv(&String::from_utf8_lossy(&o.stdout))),
         Ok(_) => Err("tesseract could not read this image".into()),
         Err(_) => {
             Err("Text recognition needs the `tesseract` command (install tesseract-ocr)".into())
@@ -133,9 +169,53 @@ fn recognize(img: &Image) -> Result<String, String> {
     }
 }
 
+/// Words from tesseract's TSV output, grouped into lines.
+#[cfg_attr(windows, allow(dead_code))]
+fn parse_tsv(tsv: &str) -> Vec<Line> {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut current: Option<(u32, u32, u32)> = None;
+    for row in tsv.lines().skip(1) {
+        let f: Vec<&str> = row.split('\t').collect();
+        if f.len() < 12 || f[0] != "5" {
+            continue;
+        }
+        let text = f[11].trim();
+        if text.is_empty() {
+            continue;
+        }
+        let num = |i: usize| f[i].parse::<f32>().unwrap_or(0.0);
+        let key = (num(2) as u32, num(3) as u32, num(4) as u32);
+        if current != Some(key) {
+            lines.push(Vec::new());
+            current = Some(key);
+        }
+        if let Some(line) = lines.last_mut() {
+            line.push(Word {
+                text: text.to_string(),
+                rect: RectF::new(num(6), num(7), num(8), num(9)),
+            });
+        }
+    }
+    lines
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tesseract_tsv_becomes_lines_of_words() {
+        let tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n\
+                   4\t1\t1\t1\t1\t0\t10\t10\t200\t20\t-1\t\n\
+                   5\t1\t1\t1\t1\t1\t10\t10\t50\t20\t96\tHello\n\
+                   5\t1\t1\t1\t1\t2\t70\t10\t60\t20\t95\tKrab\n\
+                   5\t1\t1\t1\t2\t1\t10\t40\t80\t20\t91\tsecond\n";
+        let lines = parse_tsv(tsv);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0][1].text, "Krab");
+        assert_eq!(lines[0][1].rect, RectF::new(70.0, 10.0, 60.0, 20.0));
+        assert_eq!(lines_to_text(&lines), "Hello Krab\nsecond");
+    }
 
     #[test]
     fn merge_appends_only_new_codes() {

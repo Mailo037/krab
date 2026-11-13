@@ -70,6 +70,8 @@ MODES:
 OPTIONS:
     -d, --delay <SECONDS>      wait before capturing (menus, hover states...)
     -r, --record               record the screen instead of taking a picture
+    -t, --text                 copy the text in the selected area (OCR)
+        --scroll               scroll the selected area and stitch one tall image
     -c, --copy                 copy as soon as the area is selected
     -e, --edit                 always open the markup tools after selecting
     -o, --output <FILE>        also save the result to FILE (png, jpg, bmp, gif)
@@ -148,6 +150,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
                     .min(3600);
             }
             "-r" | "--record" | "record" => req.kind = Kind::Record,
+            "-t" | "--text" | "text" => req.text = true,
+            "--scroll" | "scroll" => req.scroll = true,
             "-c" | "--copy" => req.quick = Some(true),
             "-e" | "--edit" => req.quick = Some(false),
             "-o" | "--output" => out.output = Some(PathBuf::from(value(&mut it, "--output")?)),

@@ -72,6 +72,12 @@ pub enum Btn {
     Undo,
     Redo,
     Ocr,
+    /// Cover e-mail addresses, phone numbers and the like.
+    Redact,
+    /// Put the snip on a background with padding and a shadow.
+    Frame,
+    /// Keep the snip on screen in its own window.
+    Pin,
     Open,
     Save,
     Copy,
@@ -126,6 +132,7 @@ pub enum Finish {
     SaveAs,
     OpenExternal,
     ExtractText,
+    Pin,
 }
 
 pub enum Outcome {
@@ -137,6 +144,11 @@ pub enum Outcome {
     Record(RectI),
     /// Put text on the clipboard; the overlay stays open.
     CopyText(String),
+    /// Find sensitive text in this image of the selection; the answer comes
+    /// back through [`Overlay::apply_redactions`].
+    Redact(Image),
+    /// Start a scrolling capture of this area (pixels, relative to the monitor).
+    Scroll(RectI),
 }
 
 /// Renders one window on its own (see `capture::grab_window`).
@@ -146,21 +158,36 @@ pub type WindowGrabber = fn(u64) -> Option<WindowImage>;
 #[derive(Clone, Debug)]
 pub struct Options {
     pub quick_copy: bool,
+    /// Copy the text in the area as soon as it is selected.
+    pub quick_text: bool,
+    /// Start a scrolling capture of the area as soon as it is selected.
+    pub scroll: bool,
     pub loupe: bool,
     pub border: Option<(Color, u32)>,
     pub color: Color,
     /// Used to show a picked window without the windows covering it.
     pub grab_window: Option<WindowGrabber>,
+    /// Framed output: background gradient colours.
+    pub frame: Option<(Color, Color)>,
+    /// Colours used when framing is switched on in the overlay.
+    pub frame_colors: (Color, Color),
+    /// What the colour picker copies: "hex", "rgb" or "hsl".
+    pub color_format: String,
 }
 
 impl Options {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             quick_copy: cfg.quick_copy(),
+            quick_text: false,
+            scroll: false,
             loupe: cfg.loupe,
             border: cfg.border.then(|| (cfg.border_color(), cfg.border_width)),
             color: cfg.annotation_color(),
             grab_window: Some(crate::capture::grab_window),
+            frame: cfg.frame.then(|| cfg.frame_colors()),
+            frame_colors: cfg.frame_colors(),
+            color_format: cfg.color_format.clone(),
         }
     }
 }
@@ -169,10 +196,15 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             quick_copy: false,
+            quick_text: false,
+            scroll: false,
             loupe: true,
             border: None,
             color: theme::PALETTE[0],
             grab_window: None,
+            frame: None,
+            frame_colors: (theme::ACCENT, Color::rgb(0x7B, 0x2F, 0xF7)),
+            color_format: "hex".into(),
         }
     }
 }
@@ -235,6 +267,8 @@ enum Drag {
 struct TextEdit {
     pos: Pt,
     text: String,
+    /// Typing into a callout pointing here.
+    tip: Option<Pt>,
 }
 
 pub struct Overlay {
@@ -496,7 +530,13 @@ impl Overlay {
         });
         self.started_selection = true;
         self.dirty = true;
-        if self.ui.kind == Kind::Snip && self.opts.quick_copy {
+        if self.ui.kind == Kind::Snip && self.opts.scroll {
+            if let Some(r) = self.selection() {
+                self.outcome = Some(Outcome::Scroll(r));
+            }
+        } else if self.ui.kind == Kind::Snip && self.opts.quick_text {
+            self.finish(Finish::ExtractText);
+        } else if self.ui.kind == Kind::Snip && self.opts.quick_copy {
             self.finish(Finish::Copy);
         }
     }
@@ -732,17 +772,64 @@ impl Overlay {
         if let Some(edit) = self.text_edit.take() {
             if !edit.text.trim().is_empty() {
                 self.checkpoint();
-                self.annotations.push(Annotation {
-                    shape: Shape::Text {
+                let shape = match edit.tip {
+                    Some(tip) => Shape::Callout {
+                        tip,
                         pos: edit.pos,
                         text: edit.text,
                         size: self.text_em(),
                     },
+                    None => Shape::Text {
+                        pos: edit.pos,
+                        text: edit.text,
+                        size: self.text_em(),
+                    },
+                };
+                self.annotations.push(Annotation {
+                    shape,
                     color: self.color,
                     width: self.stroke_width(),
                 });
             }
             self.dirty = true;
+        }
+    }
+
+    /// The radius of a new step marker.
+    fn step_radius(&self) -> f32 {
+        (9.0 + theme::WIDTHS[self.width_idx] * 1.6) * self.scale
+    }
+
+    /// Cover what the background search found. `boxes` are in pixels of
+    /// the selection, as handed out with [`Outcome::Redact`].
+    pub fn apply_redactions(&mut self, boxes: Result<Vec<RectF>, String>) {
+        let Some(sel) = self.selection() else {
+            return;
+        };
+        match boxes {
+            Ok(boxes) if !boxes.is_empty() => {
+                self.commit_text();
+                self.checkpoint();
+                let n = boxes.len();
+                for b in boxes {
+                    let r = RectF::new(b.x + sel.x as f32, b.y + sel.y as f32, b.w, b.h)
+                        .intersect(&sel.to_f());
+                    if !r.is_empty() {
+                        self.annotations.push(Annotation {
+                            shape: Shape::Fill(r),
+                            color: Color::rgb(0x0B, 0x0B, 0x0D),
+                            width: 0.0,
+                        });
+                    }
+                }
+                self.flash(if n == 1 {
+                    "Covered 1 item".to_string()
+                } else {
+                    format!("Covered {n} items")
+                });
+            }
+            Ok(_) => self.flash("Nothing personal found"),
+            Err(e) => self.flash(e),
         }
     }
 
@@ -757,6 +844,15 @@ impl Overlay {
 
     /// Render the selection with all annotations to a standalone image.
     pub fn compose(&self) -> Option<Image> {
+        let img = self.compose_with(true)?;
+        Some(match self.opts.frame {
+            Some((a, b)) => crate::output::frame(&img, a, b, self.scale),
+            None => img,
+        })
+    }
+
+    /// The selected pixels, with or without the markup.
+    fn compose_with(&self, markup: bool) -> Option<Image> {
         let sel = self.sel.as_ref()?;
         let r = sel
             .rect
@@ -779,10 +875,10 @@ impl Overlay {
             };
             let mut c =
                 Canvas::new(&mut out, w as u32, h as u32).with_offset(-r.x as f32, -r.y as f32);
-            for a in &self.annotations {
+            for a in self.annotations.iter().filter(|_| markup) {
                 a.draw(&mut c, &src, self.scale);
             }
-            if let (Some((color, bw)), None) = (self.opts.border, &sel.mask) {
+            if let (Some((color, bw)), None, true) = (self.opts.border, &sel.mask, markup) {
                 let bw = bw as f32;
                 let inner =
                     RectF::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32).inflate(-bw / 2.0);
@@ -1014,8 +1110,37 @@ impl Overlay {
                 });
                 self.drag = Drag::Draw { start: p };
             }
-            Tool::Line | Tool::Arrow | Tool::Rect | Tool::Ellipse | Tool::Pixelate => {
+            Tool::Line
+            | Tool::Arrow
+            | Tool::Rect
+            | Tool::Ellipse
+            | Tool::Pixelate
+            | Tool::Blur
+            | Tool::Measure
+            | Tool::Callout => {
                 self.drag = Drag::Draw { start: p };
+            }
+            Tool::Step => {
+                let n = self
+                    .annotations
+                    .iter()
+                    .filter_map(|a| match a.shape {
+                        Shape::Step { n, .. } => Some(n),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                self.checkpoint();
+                self.annotations.push(Annotation {
+                    shape: Shape::Step {
+                        at: p,
+                        n,
+                        r: self.step_radius(),
+                    },
+                    color: self.color,
+                    width: self.stroke_width(),
+                });
             }
             Tool::Text => {
                 let m = crate::gfx::text::ui().metrics(self.text_em());
@@ -1023,6 +1148,7 @@ impl Overlay {
                 self.text_edit = Some(TextEdit {
                     pos: Pt::new(p.x, p.y - m.line_height / 2.0),
                     text: String::new(),
+                    tip: None,
                 });
             }
             Tool::Eraser => {
@@ -1060,15 +1186,33 @@ impl Overlay {
                 ));
                 self.finish_lasso(pts);
             }
-            Drag::Draw { .. } => {
+            Drag::Draw { start } => {
+                if self.tool == Tool::Callout {
+                    self.draft = None;
+                    // A plain click puts the bubble up and to the right.
+                    let pos = if start.dist(p) < 8.0 * self.scale {
+                        Pt::new(start.x + 28.0 * self.scale, start.y - 56.0 * self.scale)
+                    } else {
+                        p
+                    };
+                    let m = crate::gfx::text::ui().metrics(self.text_em());
+                    self.text_edit = Some(TextEdit {
+                        pos: Pt::new(pos.x, pos.y - m.line_height / 2.0),
+                        text: String::new(),
+                        tip: Some(start),
+                    });
+                    return;
+                }
                 if let Some(d) = self.draft.take() {
                     let keep = match &d.shape {
                         Shape::Stroke { .. } => true,
-                        Shape::Line { a, b, .. } => a.dist(*b) >= 3.0,
-                        Shape::Rect(r) | Shape::Ellipse(r) | Shape::Pixelate(r) => {
-                            r.w >= 3.0 && r.h >= 3.0
-                        }
-                        Shape::Text { .. } => true,
+                        Shape::Line { a, b, .. } | Shape::Measure { a, b, .. } => a.dist(*b) >= 3.0,
+                        Shape::Rect(r)
+                        | Shape::Ellipse(r)
+                        | Shape::Pixelate(r)
+                        | Shape::Blur(r)
+                        | Shape::Fill(r) => r.w >= 3.0 && r.h >= 3.0,
+                        Shape::Text { .. } | Shape::Step { .. } | Shape::Callout { .. } => true,
                     };
                     if keep {
                         self.checkpoint();
@@ -1146,6 +1290,37 @@ impl Overlay {
                     width,
                 })
             }
+            Tool::Blur => {
+                self.draft = Some(Annotation {
+                    shape: Shape::Blur(square(start, p)),
+                    color,
+                    width,
+                })
+            }
+            Tool::Measure => {
+                let b = if shift { snap_angle(start, p) } else { p };
+                self.draft = Some(Annotation {
+                    shape: Shape::Measure {
+                        a: start,
+                        b,
+                        size: 11.5 * self.scale,
+                    },
+                    color,
+                    width: (width * 0.5).max(1.5 * self.scale),
+                })
+            }
+            Tool::Callout => {
+                // Preview the tail while choosing where the bubble goes.
+                self.draft = Some(Annotation {
+                    shape: Shape::Line {
+                        a: p,
+                        b: start,
+                        arrow: false,
+                    },
+                    color,
+                    width: 2.0 * self.scale,
+                })
+            }
             _ => {}
         }
     }
@@ -1171,9 +1346,9 @@ impl Overlay {
         }
         let c = Color::from_u32(self.px[(y as u32 * self.w + x as u32) as usize]);
         self.color = c;
-        let hex = c.to_hex_string();
-        self.flash = Some((format!("Copied {hex}"), Instant::now()));
-        self.outcome = Some(Outcome::CopyText(hex));
+        let text = c.format(&self.opts.color_format);
+        self.flash = Some((format!("Copied {text}"), Instant::now()));
+        self.outcome = Some(Outcome::CopyText(text));
     }
 
     /// Show a short message at the top of the overlay.
@@ -1310,6 +1485,7 @@ impl Overlay {
         match c.to_ascii_lowercase() {
             'c' => self.confirm(),
             's' if self.sel.is_some() && self.ui.kind == Kind::Snip => self.finish(Finish::SaveAs),
+            't' if self.sel.is_some() && self.ui.kind == Kind::Snip => self.finish(Finish::Pin),
             'z' if self.mods.shift => self.redo(),
             'z' => self.undo(),
             'y' => self.redo(),
@@ -1346,8 +1522,16 @@ impl Overlay {
             'e' | 'o' => Tool::Ellipse,
             't' => Tool::Text,
             'b' => Tool::Pixelate,
+            'g' => Tool::Blur,
+            'k' => Tool::Callout,
+            'n' => Tool::Step,
+            'm' => Tool::Measure,
             'x' => Tool::Eraser,
             'i' | 'c' => Tool::Pipette,
+            'f' => {
+                self.activate(Btn::Frame);
+                return;
+            }
             _ => return,
         };
         self.tool = tool;
@@ -1414,6 +1598,7 @@ impl Overlay {
             Btn::Mode(m) => self.ui.mode == m,
             Btn::Tool(t) => self.tool == t,
             Btn::Color(i) => theme::PALETTE[i as usize] == self.color,
+            Btn::Frame => self.opts.frame.is_some(),
             Btn::Width(i) => self.width_idx == i as usize,
             _ => false,
         }
@@ -1451,6 +1636,25 @@ impl Overlay {
             Btn::Undo => self.undo(),
             Btn::Redo => self.redo(),
             Btn::Ocr => self.finish(Finish::ExtractText),
+            Btn::Redact => {
+                self.commit_text();
+                if let Some(img) = self.compose_with(false) {
+                    self.outcome = Some(Outcome::Redact(img));
+                    self.flash("Looking for addresses, numbers and keys...");
+                }
+            }
+            Btn::Frame => {
+                self.opts.frame = match self.opts.frame {
+                    Some(_) => None,
+                    None => Some(self.opts.frame_colors),
+                };
+                self.flash(if self.opts.frame.is_some() {
+                    "The snip gets a background"
+                } else {
+                    "No background"
+                });
+            }
+            Btn::Pin => self.finish(Finish::Pin),
             Btn::Open => self.finish(Finish::OpenExternal),
             Btn::Save => self.finish(Finish::SaveAs),
             Btn::Copy => self.finish(Finish::Copy),
@@ -1505,6 +1709,7 @@ impl Overlay {
         match self.tool {
             Tool::Select => CursorKind::Default,
             Tool::Text => CursorKind::Text,
+            Tool::Step => CursorKind::Pointer,
             Tool::Eraser => CursorKind::Pointer,
             _ => CursorKind::Crosshair,
         }

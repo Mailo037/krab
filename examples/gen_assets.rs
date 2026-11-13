@@ -674,7 +674,12 @@ fn scene_settings() -> (Vec<u32>, u32, u32) {
     };
     let mut ui = krab::settings::Settings::new(
         cfg,
-        [Status::Active, Status::Taken, Status::Active],
+        [
+            Status::Active,
+            Status::Taken,
+            Status::Active,
+            Status::Active,
+        ],
         true,
         false,
     );

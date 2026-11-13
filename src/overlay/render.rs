@@ -442,12 +442,21 @@ impl Overlay {
                 w: self.w,
                 h: self.h,
             };
-            Annotation {
-                shape: Shape::Text {
+            let shape = match edit.tip {
+                Some(tip) => Shape::Callout {
+                    tip,
                     pos: edit.pos,
                     text: edit.text.clone(),
                     size: em,
                 },
+                None => Shape::Text {
+                    pos: edit.pos,
+                    text: edit.text.clone(),
+                    size: em,
+                },
+            };
+            Annotation {
+                shape,
                 color: self.color,
                 width: 0.0,
             }
@@ -458,7 +467,8 @@ impl Overlay {
                 tw.max(6.0 * s) + 10.0 * s,
                 th + 6.0 * s,
             );
-            if let Some(p) = crate::gfx::rrect_path(frame, 3.0 * s) {
+            // A callout's bubble already shows where the text goes.
+            if let Some(p) = crate::gfx::rrect_path(frame, 3.0 * s).filter(|_| edit.tip.is_none()) {
                 let stroke = Stroke {
                     width: 1.0 * s,
                     line_cap: LineCap::Butt,
@@ -479,11 +489,17 @@ impl Overlay {
             let last = lines.last().copied().unwrap_or("");
             let cx = edit.pos.x + text::ui().measure(last, em) + 1.5 * s;
             let cy = edit.pos.y + (lines.len() as f32 - 1.0) * m.line_height;
+            // Inside a callout the caret sits on the bubble's colour.
+            let caret = match edit.tip {
+                Some(_) if self.color.luma() > 170.0 => Color::rgb(0x1C, 0x1C, 0x1E),
+                Some(_) => Color::WHITE,
+                None => self.color,
+            };
             c.line(
                 Pt::new(cx, cy + 2.0 * s),
                 Pt::new(cx, cy + m.line_height - 2.0 * s),
                 1.6 * s,
-                self.color,
+                caret,
             );
         }
 
@@ -516,6 +532,12 @@ impl Overlay {
         }
         if self.sel.is_none() && matches!(self.drag, Drag::None) {
             let hint = match (self.ui.kind, self.ui.mode) {
+                (Kind::Snip, Mode::Rect | Mode::Freeform) if self.opts.scroll => {
+                    "Drag around the area that scrolls"
+                }
+                (Kind::Snip, Mode::Rect | Mode::Freeform) if self.opts.quick_text => {
+                    "Drag around the text to copy"
+                }
                 (Kind::Record, Mode::Window) => "Click the window to record",
                 (Kind::Record, Mode::Fullscreen) => "Click to record this screen",
                 (Kind::Record, _) => "Drag to choose the area to record",
@@ -840,7 +862,7 @@ impl Overlay {
         let sw_rect = RectF::new(gx + 1.0 * s, line1 - sw / 2.0, sw, sw);
         c.fill_rrect(sw_rect, 2.5 * s, center_color);
         c.stroke_rrect(sw_rect, 2.5 * s, 1.0, theme::PANEL_BORDER);
-        let hex = center_color.to_hex_string();
+        let hex = center_color.format(&self.opts.color_format);
         text::ui().draw(
             c,
             &hex,

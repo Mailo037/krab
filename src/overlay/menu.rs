@@ -13,7 +13,11 @@ pub enum Item {
     ExtractText,
     OpenExternal,
     StartRecording,
+    Pin,
+    Redact,
     CopyColor,
+    CopyColorRgb,
+    CopyColorHsl,
     SnipWindow,
     SnipScreen,
     Undo,
@@ -57,7 +61,9 @@ impl Overlay {
                 items.extend([
                     Some(Item::Copy),
                     Some(Item::SaveAs),
+                    Some(Item::Pin),
                     Some(Item::ExtractText),
+                    Some(Item::Redact),
                     Some(Item::OpenExternal),
                     None,
                 ]);
@@ -72,6 +78,8 @@ impl Overlay {
             items.push(Some(Item::SnipScreen));
         }
         items.push(Some(Item::CopyColor));
+        items.push(Some(Item::CopyColorRgb));
+        items.push(Some(Item::CopyColorHsl));
         items.push(None);
         if has_sel && !self.undo.is_empty() {
             items.push(Some(Item::Undo));
@@ -99,7 +107,11 @@ impl Overlay {
             Item::ExtractText => "Copy text / QR code".into(),
             Item::OpenExternal => "Open in default app".into(),
             Item::StartRecording => "Start recording".into(),
+            Item::Pin => "Pin to screen".into(),
+            Item::Redact => "Hide e-mails, numbers and keys".into(),
             Item::CopyColor => format!("Copy colour {}", menu.color.to_hex_string()),
+            Item::CopyColorRgb => format!("Copy {}", menu.color.to_rgb_string()),
+            Item::CopyColorHsl => format!("Copy {}", menu.color.to_hsl_string()),
             Item::SnipWindow if has_sel => "Select this window instead".into(),
             Item::SnipWindow if self.ui.kind == Kind::Record => "Record this window".into(),
             Item::SnipWindow => "Snip this window".into(),
@@ -118,7 +130,9 @@ impl Overlay {
             Item::ExtractText => Icon::TextScan,
             Item::OpenExternal => Icon::External,
             Item::StartRecording => Icon::Video,
-            Item::CopyColor => Icon::Pipette,
+            Item::Pin => Icon::Pin,
+            Item::Redact => Icon::Redact,
+            Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl => Icon::Pipette,
             Item::SnipWindow => Icon::ModeWindow,
             Item::SnipScreen => Icon::ModeFull,
             Item::Undo => Icon::Undo,
@@ -147,6 +161,13 @@ impl Overlay {
                     &["Cmd", "Z"]
                 } else {
                     &["Ctrl", "Z"]
+                }
+            }
+            Item::Pin => {
+                if ctrl == "Cmd" {
+                    &["Cmd", "T"]
+                } else {
+                    &["Ctrl", "T"]
                 }
             }
             Item::Cancel => &["Esc"],
@@ -236,10 +257,16 @@ impl Overlay {
             Item::ExtractText => self.finish(Finish::ExtractText),
             Item::OpenExternal => self.finish(Finish::OpenExternal),
             Item::StartRecording => self.confirm(),
-            Item::CopyColor => {
-                let hex = menu.color.to_hex_string();
-                self.flash = Some((format!("Copied {hex}"), Instant::now()));
-                self.outcome = Some(Outcome::CopyText(hex));
+            Item::Pin => self.finish(Finish::Pin),
+            Item::Redact => self.activate(super::Btn::Redact),
+            Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl => {
+                let text = match item {
+                    Item::CopyColorRgb => menu.color.to_rgb_string(),
+                    Item::CopyColorHsl => menu.color.to_hsl_string(),
+                    _ => menu.color.to_hex_string(),
+                };
+                self.flash = Some((format!("Copied {text}"), Instant::now()));
+                self.outcome = Some(Outcome::CopyText(text));
             }
             Item::SnipWindow => {
                 if let Some(w) = menu.window {
@@ -289,7 +316,10 @@ impl Overlay {
             }
             let cy = r.y + r.h / 2.0;
             let icon_c = Pt::new(r.x + 16.0 * s, cy);
-            if *item == Item::CopyColor {
+            if matches!(
+                item,
+                Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl
+            ) {
                 c.fill_rrect(
                     RectF::new(icon_c.x - 7.0 * s, cy - 7.0 * s, 14.0 * s, 14.0 * s),
                     4.0 * s,

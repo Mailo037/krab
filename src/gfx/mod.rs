@@ -56,6 +56,46 @@ impl Color {
     pub fn to_hex_string(self) -> String {
         format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
     }
+    pub fn to_rgb_string(self) -> String {
+        format!("rgb({}, {}, {})", self.r, self.g, self.b)
+    }
+    pub fn to_hsl_string(self) -> String {
+        let (r, g, b) = (
+            self.r as f32 / 255.0,
+            self.g as f32 / 255.0,
+            self.b as f32 / 255.0,
+        );
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let l = (max + min) / 2.0;
+        let d = max - min;
+        let (h, s) = if d < 1e-6 {
+            (0.0, 0.0)
+        } else {
+            let s = d / (1.0 - (2.0 * l - 1.0).abs());
+            let h = if max == r {
+                ((g - b) / d).rem_euclid(6.0)
+            } else if max == g {
+                (b - r) / d + 2.0
+            } else {
+                (r - g) / d + 4.0
+            };
+            (h * 60.0, s)
+        };
+        format!(
+            "hsl({}, {}%, {}%)",
+            h.round() as u32 % 360,
+            (s * 100.0).round() as u32,
+            (l * 100.0).round() as u32
+        )
+    }
+    /// In the notation `fmt` names: "hex", "rgb" or "hsl".
+    pub fn format(self, fmt: &str) -> String {
+        match fmt {
+            "rgb" => self.to_rgb_string(),
+            "hsl" => self.to_hsl_string(),
+            _ => self.to_hex_string(),
+        }
+    }
     pub fn parse(s: &str) -> Option<Color> {
         let s = s.trim().trim_start_matches('#');
         if s.len() != 6 {
@@ -535,6 +575,46 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Blur the area `r` (in canvas space) using pixels from `src`, which
+    /// shares this canvas' coordinate space before the offset is applied.
+    /// Three box blurs approximate a Gaussian; the surroundings are blurred
+    /// in, so the edges of the area stay soft instead of darkening.
+    pub fn blur(&mut self, src: &[u32], sw: u32, sh: u32, r: RectI, radius: i32) {
+        let screen = RectI::new(0, 0, sw as i32, sh as i32);
+        let r = r.intersect(&screen);
+        if r.is_empty() || self.record(r.to_f(), 0.0) {
+            return;
+        }
+        let radius = radius.max(1);
+        let area = r.inflate(radius * 3).intersect(&screen);
+        let (w, h) = (area.w as usize, area.h as usize);
+        let mut a: Vec<u32> = Vec::with_capacity(w * h);
+        for y in area.y..area.bottom() {
+            let o = y as usize * sw as usize;
+            a.extend_from_slice(&src[o + area.x as usize..o + area.right() as usize]);
+        }
+        let mut b = vec![0u32; w * h];
+        for _ in 0..3 {
+            box_blur(&a, &mut b, w, h, 1, w, radius as usize);
+            box_blur(&b, &mut a, h, w, w, 1, radius as usize);
+        }
+        let (ox, oy) = (self.ox.round() as i32, self.oy.round() as i32);
+        let (cw, ch) = (self.w as i32, self.h as i32);
+        for y in r.y..r.bottom() {
+            let dy = y + oy;
+            if dy < 0 || dy >= ch {
+                continue;
+            }
+            for x in r.x..r.right() {
+                let dx = x + ox;
+                if dx >= 0 && dx < cw {
+                    let v = a[(y - area.y) as usize * w + (x - area.x) as usize];
+                    self.buf[(dy * cw + dx) as usize] = v | 0xFF00_0000;
+                }
+            }
+        }
+    }
+
     /// Draw an opaque RGBA image scaled to fit `dst` (box-sampled, for thumbnails).
     pub fn blit_rgba_fit(&mut self, rgba: &[u8], iw: u32, ih: u32, dst: RectF) {
         if iw == 0 || ih == 0 || dst.is_empty() || self.record(dst, 0.0) {
@@ -584,6 +664,42 @@ impl<'a> Canvas<'a> {
                 self.buf[(y as u32 * self.w + x as u32) as usize] =
                     0xFF00_0000 | (r / n) << 16 | (g / n) << 8 | (b / n);
             }
+        }
+    }
+}
+
+/// One box-blur pass along `lines` lines of `len` pixels each. `step` is the
+/// distance between neighbouring pixels of a line, `stride` between lines,
+/// so the same code runs horizontally (1, w) and vertically (w, 1).
+fn box_blur(
+    src: &[u32],
+    dst: &mut [u32],
+    lines: usize,
+    len: usize,
+    stride: usize,
+    step: usize,
+    r: usize,
+) {
+    if len == 0 {
+        return;
+    }
+    let d = (2 * r + 1) as u32;
+    for line in 0..lines {
+        let base = line * stride;
+        let at = |i: isize| -> u32 { src[base + i.clamp(0, len as isize - 1) as usize * step] };
+        let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+        for i in -(r as isize)..=r as isize {
+            let p = at(i);
+            sr += (p >> 16) & 0xFF;
+            sg += (p >> 8) & 0xFF;
+            sb += p & 0xFF;
+        }
+        for i in 0..len {
+            dst[base + i * step] = 0xFF00_0000 | (sr / d) << 16 | (sg / d) << 8 | (sb / d);
+            let (add, sub) = (at(i as isize + r as isize + 1), at(i as isize - r as isize));
+            sr = sr + ((add >> 16) & 0xFF) - ((sub >> 16) & 0xFF);
+            sg = sg + ((add >> 8) & 0xFF) - ((sub >> 8) & 0xFF);
+            sb = sb + (add & 0xFF) - (sub & 0xFF);
         }
     }
 }
@@ -745,6 +861,16 @@ mod tests {
         assert_eq!(c.to_hex_string(), "#F46623");
         assert_eq!(Color::from_u32(c.to_u32()), c);
         assert!(Color::parse("nope").is_none());
+    }
+
+    #[test]
+    fn colour_notations() {
+        let c = Color::rgb(0xF4, 0x66, 0x23);
+        assert_eq!(c.format("rgb"), "rgb(244, 102, 35)");
+        assert_eq!(c.format("hsl"), "hsl(19, 90%, 55%)");
+        assert_eq!(c.format("hex"), "#F46623");
+        assert_eq!(Color::rgb(128, 128, 128).format("hsl"), "hsl(0, 0%, 50%)");
+        assert_eq!(Color::rgb(0, 0, 255).format("hsl"), "hsl(240, 100%, 50%)");
     }
 
     #[test]

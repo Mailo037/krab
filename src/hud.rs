@@ -6,6 +6,7 @@ use crate::gfx::{icons, text, theme, Canvas, Color};
 use crate::output::Image;
 use crate::record::Control;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,6 +29,13 @@ pub enum Hud {
         /// Pointer position (device pixels) while it is over the HUD.
         pointer: Option<Pt>,
     },
+    /// A scrolling capture is collecting rows.
+    Scrolling {
+        /// Rows collected so far.
+        height: Arc<AtomicU32>,
+        /// Krab scrolls by itself (otherwise the user scrolls).
+        auto: bool,
+    },
 }
 
 /// What a click on a HUD does.
@@ -49,6 +57,7 @@ impl Hud {
             }
             Hud::Countdown { .. } => (250.0, 52.0),
             Hud::Recording { .. } => (214.0, 46.0),
+            Hud::Scrolling { .. } => (330.0, 46.0),
         }
     }
 
@@ -71,6 +80,7 @@ impl Hud {
                     HudHit::Stop
                 }
             }
+            Hud::Scrolling { .. } => HudHit::Stop,
             _ => HudHit::Other,
         }
     }
@@ -166,6 +176,31 @@ impl Hud {
                     10.5 * s,
                     theme::ICON_DISABLED,
                 );
+            }
+            Hud::Scrolling { height, auto } => {
+                let cy = fh / 2.0;
+                icons::draw(
+                    &mut c,
+                    icons::Icon::Scroll,
+                    Pt::new(24.0 * s, cy),
+                    20.0 * s,
+                    theme::ACCENT,
+                );
+                let rows = height.load(Ordering::Relaxed);
+                let label = if *auto {
+                    format!("Scrolling... {rows} px")
+                } else {
+                    format!("Scroll now... {rows} px")
+                };
+                let base = face.baseline_for_center(cy, 13.0 * s);
+                face.draw(&mut c, &label, 44.0 * s, base, 13.0 * s, theme::TEXT);
+                let btn = RectF::new(fw - 78.0 * s, cy - 15.0 * s, 68.0 * s, 30.0 * s);
+                c.fill_rrect(
+                    btn,
+                    7.0 * s,
+                    if hovered { theme::ACCENT } else { theme::HOVER },
+                );
+                face.draw_centered(&mut c, "Done", btn.center().x, cy, 12.5 * s, Color::WHITE);
             }
             Hud::Recording {
                 control,
@@ -321,6 +356,10 @@ mod tests {
                 control: Arc::new(Control::new()),
                 saving: true,
                 pointer: None,
+            },
+            Hud::Scrolling {
+                height: Arc::new(AtomicU32::new(2400)),
+                auto: true,
             },
         ];
         for hud in &huds {

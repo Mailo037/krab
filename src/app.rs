@@ -41,6 +41,12 @@ pub enum UserEvent {
     TrayClick,
     RecordingDone(Result<PathBuf, String>),
     TextExtracted(Result<String, String>),
+    /// Boxes over sensitive text in the selection, or why there are none.
+    Redacted(Result<Vec<crate::geom::RectF>, String>),
+    /// A snip was added to the history (refresh the tray menu).
+    HistoryChanged,
+    /// A scrolling capture finished.
+    Scrolled(Result<Image, String>),
     /// An update check finished; `true` when the user asked for it.
     Update(Result<update::Outcome, String>, bool),
 }
@@ -110,6 +116,14 @@ enum Anchor {
     BottomRight,
 }
 
+struct PinWin {
+    window: Rc<Window>,
+    surface: Surface,
+    pin: crate::pin::Pin,
+    scale: f32,
+    last_click: Option<Instant>,
+}
+
 struct HudWin {
     window: Rc<Window>,
     surface: Surface,
@@ -145,10 +159,16 @@ pub struct App {
     started: bool,
     tray: Option<tray::Tray>,
     hotkeys: Option<Hotkeys>,
-    hotkey_status: [hotkey::Status; 3],
+    hotkey_status: hotkey::Statuses,
     settings: Option<SettingsWin>,
     /// Modifier keys, as the settings window sees them.
     key_mods: hotkey::Mods,
+    /// Snips pinned to the screen.
+    pins: Vec<PinWin>,
+    /// Where the next pin goes (the selection's top-left, device pixels).
+    pin_at: Option<PhysicalPosition<i32>>,
+    /// A scrolling capture is running.
+    scrolling: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 struct SettingsWin {
@@ -194,13 +214,12 @@ pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
         started: false,
         tray: None,
         hotkeys: None,
-        hotkey_status: [
-            hotkey::Status::Off,
-            hotkey::Status::Off,
-            hotkey::Status::Off,
-        ],
+        hotkey_status: std::array::from_fn(|_| hotkey::Status::Off),
         settings: None,
         key_mods: hotkey::Mods::default(),
+        pins: Vec::new(),
+        pin_at: None,
+        scrolling: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())
 }
@@ -345,6 +364,21 @@ fn draw_hud(win: &mut HudWin) {
     let _ = buf.present();
 }
 
+fn draw_pin(win: &mut PinWin) {
+    let size = win.window.inner_size();
+    let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+        return;
+    };
+    if win.surface.resize(w, h).is_err() {
+        return;
+    }
+    let Ok(mut buf) = win.surface.buffer_mut() else {
+        return;
+    };
+    win.pin.render(&mut buf, size.width, size.height, win.scale);
+    let _ = buf.present();
+}
+
 /// "Screenshots" from ".../Pictures/Screenshots/Krab_x.png".
 fn folder_name(path: &Path) -> String {
     path.parent()
@@ -374,6 +408,8 @@ impl App {
             && self.busy == 0
             && self.pending.is_none()
             && self.settings.is_none()
+            && self.pins.is_empty()
+            && self.scrolling.is_none()
             && !output::clipboard_busy()
     }
 
@@ -410,6 +446,11 @@ impl App {
     /// Entry point for every "take a snip" trigger.
     fn request(&mut self, el: &ActiveEventLoop, req: Request) {
         trace::mark("snip requested");
+        if let Some(stop) = &self.scrolling {
+            // The hotkey doubles as "done" for a scrolling capture.
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            return;
+        }
         if let Some(rec) = &self.recorder {
             // The hotkey doubles as "stop recording".
             if !rec.is_stopping() {
@@ -453,6 +494,11 @@ impl App {
         let mut opts = Options::from_config(&self.cfg);
         if let Some(q) = req.quick {
             opts.quick_copy = q;
+        }
+        opts.quick_text = req.text;
+        opts.scroll = req.scroll;
+        if req.kind == Kind::Record {
+            crate::record::warm_up();
         }
         let cursor = cap.cursor;
         let Capture { shots, windows, .. } = cap;
@@ -613,7 +659,32 @@ impl App {
                 let _ = output::copy_text(&text);
             }
             Outcome::Cancel => self.close_session(),
+            Outcome::Redact(img) => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::Redacted(crate::redact::find(&img)));
+                });
+            }
+            Outcome::Scroll(rect) => {
+                let Some((index, native)) = self
+                    .session
+                    .as_ref()
+                    .map(|s| (s.wins[idx].index, s.wins[idx].native))
+                else {
+                    return;
+                };
+                self.close_session();
+                self.start_scrolling(el, index, native, rect);
+            }
             Outcome::Finish(kind, img) => {
+                if kind == Finish::Pin {
+                    self.pin_at = self.session.as_ref().and_then(|s| {
+                        let w = &s.wins[idx];
+                        let sel = w.overlay.selection()?;
+                        let o = w.window.inner_position().ok()?;
+                        Some(PhysicalPosition::new(o.x + sel.x, o.y + sel.y))
+                    });
+                }
                 self.close_session();
                 // Delivered from `about_to_wait`: showing a native dialog (a
                 // nested message loop) from inside a window-event callback
@@ -628,6 +699,8 @@ impl App {
                     kind: shared.map(|s| s.kind).unwrap_or(Kind::Snip),
                     delay: 0,
                     quick: None,
+                    text: false,
+                    scroll: false,
                 };
                 self.begin_delay(el, secs, req);
             }
@@ -650,9 +723,28 @@ impl App {
 
     // ---- results -----------------------------------------------------------
 
+    /// Remember a finished snip for the tray's "Recent snips".
+    fn remember(&self, img: &Image, saved: Option<PathBuf>) {
+        if !self.cfg.history {
+            return;
+        }
+        let img = img.clone();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            if crate::history::add(&img, saved.as_deref()).is_ok() {
+                let _ = proxy.send_event(UserEvent::HistoryChanged);
+            }
+        });
+    }
+
     fn deliver(&mut self, el: &ActiveEventLoop, kind: Finish, img: Image) {
         let quality = self.cfg.jpeg_quality;
         match kind {
+            Finish::Pin => {
+                self.remember(&img, None);
+                let at = self.pin_at.take();
+                self.open_pin(el, img, at);
+            }
             Finish::Copy => {
                 let mut title = String::new();
                 let mut detail = String::new();
@@ -673,6 +765,7 @@ impl App {
                 };
                 match saved {
                     Some(Ok(path)) => {
+                        self.remember(&img, Some(path.clone()));
                         if title.is_empty() {
                             title = "Screenshot saved".into();
                         }
@@ -681,8 +774,11 @@ impl App {
                         }
                         action = Some(path);
                     }
-                    Some(Err(e)) => detail = format!("Not saved: {e}"),
-                    None => {}
+                    Some(Err(e)) => {
+                        self.remember(&img, None);
+                        detail = format!("Not saved: {e}");
+                    }
+                    None => self.remember(&img, None),
                 }
                 if title.is_empty() {
                     title = "Snip taken".into();
@@ -692,7 +788,9 @@ impl App {
             Finish::SaveAs => {
                 // Copy first so the snip survives a cancelled dialog.
                 let copied = self.cfg.copy_to_clipboard && output::copy_image(&img).is_ok();
-                match output::save_as(&img, &self.cfg) {
+                let result = output::save_as(&img, &self.cfg);
+                self.remember(&img, result.as_ref().ok().cloned().flatten());
+                match result {
                     Ok(Some(path)) => {
                         let name = path
                             .file_name()
@@ -728,6 +826,7 @@ impl App {
                 };
                 match saved {
                     Ok(path) => {
+                        self.remember(&img, self.cfg.auto_save.then(|| path.clone()));
                         output::open_path(&path);
                         let detail = format!("Saved to {}", folder_name(&path));
                         self.toast(
@@ -846,8 +945,8 @@ impl App {
         };
         crate::platform::suppress_caption_paint(&window);
         let window = Rc::new(window);
-        if matches!(hud, Hud::Recording { .. }) {
-            // Keep the indicator out of the recording itself.
+        if matches!(hud, Hud::Recording { .. } | Hud::Scrolling { .. }) {
+            // Keep the indicator out of what is being captured.
             window.set_content_protected(true);
         }
         let Some(context) = self.context(el) else {
@@ -909,6 +1008,175 @@ impl App {
             Anchor::TopCenter,
             None,
         );
+    }
+
+    fn start_scrolling(&mut self, el: &ActiveEventLoop, index: usize, native: RectI, rect: RectI) {
+        use std::sync::atomic::{AtomicBool, AtomicU32};
+        use std::sync::Arc;
+        let stop = Arc::new(AtomicBool::new(false));
+        let height = Arc::new(AtomicU32::new(0));
+        let (s, h, proxy) = (stop.clone(), height.clone(), self.proxy.clone());
+        std::thread::spawn(move || {
+            let result = crate::scroll::capture(index, native, rect, &s, &h);
+            let _ = proxy.send_event(UserEvent::Scrolled(result));
+        });
+        self.scrolling = Some(stop);
+        let auto = crate::platform::scroll_wheel_at((0, 0), 0);
+        self.show_hud(el, Hud::Scrolling { height, auto }, Anchor::TopCenter, None);
+    }
+
+    // ---- pinned snips ------------------------------------------------------
+
+    fn open_pin(&mut self, el: &ActiveEventLoop, img: Image, at: Option<PhysicalPosition<i32>>) {
+        let mut pin = crate::pin::Pin::new(img);
+        let monitor = self
+            .last_monitor
+            .clone()
+            .or_else(|| el.primary_monitor())
+            .or_else(|| el.available_monitors().next());
+        let scale = monitor.as_ref().map_or(1.0, |m| m.scale_factor() as f32);
+        if let Some(m) = &monitor {
+            // Larger than the screen: start zoomed out.
+            let (w, h) = pin.size();
+            let fit = (m.size().width as f32 * 0.9 / w as f32)
+                .min(m.size().height as f32 * 0.9 / h as f32);
+            if fit < 1.0 {
+                pin.zoom = fit.max(crate::pin::MIN_ZOOM);
+            }
+        }
+        let (w, h) = pin.size();
+        let pos = at.unwrap_or_else(|| match &monitor {
+            Some(m) => PhysicalPosition::new(
+                m.position().x + (m.size().width as i32 - w as i32) / 2,
+                m.position().y + (m.size().height as i32 - h as i32) / 2,
+            ),
+            None => PhysicalPosition::new(100, 100),
+        });
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut attrs = Window::default_attributes()
+            .with_title("Krab - pinned snip")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_visible(false)
+            .with_inner_size(PhysicalSize::new(w, h))
+            .with_position(pos);
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs
+                .with_skip_taskbar(true)
+                .with_undecorated_shadow(true)
+                .with_drag_and_drop(false);
+        }
+        let Ok(window) = el.create_window(attrs) else {
+            return;
+        };
+        crate::platform::suppress_caption_paint(&window);
+        let window = Rc::new(window);
+        let Some(context) = self.context(el) else {
+            return;
+        };
+        let Ok(surface) = softbuffer::Surface::new(context, window.clone()) else {
+            return;
+        };
+        let mut win = PinWin {
+            window,
+            surface,
+            pin,
+            scale,
+            last_click: None,
+        };
+        crate::platform::cloak(&win.window, true);
+        win.window.set_visible(true);
+        draw_pin(&mut win);
+        crate::platform::cloak(&win.window, false);
+        win.window.focus_window();
+        win.window.request_redraw();
+        self.pins.push(win);
+    }
+
+    fn pin_event(&mut self, el: &ActiveEventLoop, idx: usize, event: WindowEvent) {
+        let win = &mut self.pins[idx];
+        let width = win.window.inner_size().width as f32;
+        match event {
+            WindowEvent::RedrawRequested => draw_pin(win),
+            WindowEvent::CloseRequested => {
+                self.pins.remove(idx);
+            }
+            WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => {
+                win.window.request_redraw();
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let before = (
+                    win.pin.pointer.is_some(),
+                    win.pin.over_close(width, win.scale),
+                );
+                win.pin.pointer = Some(crate::geom::Pt::new(position.x as f32, position.y as f32));
+                if before != (true, win.pin.over_close(width, win.scale)) {
+                    win.window.request_redraw();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                win.pin.pointer = None;
+                win.window.request_redraw();
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let now = Instant::now();
+                let double = win
+                    .last_click
+                    .is_some_and(|t| now.duration_since(t) < Duration::from_millis(400));
+                if win.pin.over_close(width, win.scale) || double {
+                    self.pins.remove(idx);
+                    return;
+                }
+                win.last_click = Some(now);
+                let _ = win.window.drag_window();
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let steps = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                if win.pin.zoom_by(steps) {
+                    let (w, h) = win.pin.size();
+                    let _ = win.window.request_inner_size(PhysicalSize::new(w, h));
+                    win.window.request_redraw();
+                }
+            }
+            WindowEvent::ModifiersChanged(m) => {
+                let st = m.state();
+                self.mods.ctrl = st.control_key() || st.super_key();
+                self.mods.shift = st.shift_key();
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let ctrl = self.mods.ctrl;
+                match &event.logical_key {
+                    WinitKey::Named(NamedKey::Escape) => {
+                        self.pins.remove(idx);
+                    }
+                    WinitKey::Character(c) if ctrl && c.eq_ignore_ascii_case("c") => {
+                        let img = win.pin.img.clone();
+                        let ok = output::copy_image(&img).is_ok();
+                        let title = if ok {
+                            "Copied to clipboard"
+                        } else {
+                            "Could not copy to the clipboard"
+                        };
+                        self.toast(el, title.into(), String::new(), Some(&img), None);
+                    }
+                    WinitKey::Character(c) if ctrl && c.eq_ignore_ascii_case("s") => {
+                        self.pending = Some((Finish::SaveAs, win.pin.img.clone()));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
     }
 
     fn stop_recording(&mut self) {
@@ -1064,6 +1332,11 @@ impl App {
                     self.delay = None;
                     self.huds.remove(idx);
                 }
+                Hud::Scrolling { .. } => {
+                    if let Some(stop) = &self.scrolling {
+                        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
                 Hud::Recording {
                     saving,
                     pointer,
@@ -1191,10 +1464,53 @@ impl App {
                     ..Request::default()
                 },
             ),
+            "text" => settle(
+                self,
+                Request {
+                    text: true,
+                    ..Request::default()
+                },
+            ),
+            "scroll" => settle(
+                self,
+                Request {
+                    scroll: true,
+                    ..Request::default()
+                },
+            ),
             "folder" => {
                 let dir = self.cfg.save_dir();
                 let _ = std::fs::create_dir_all(&dir);
                 output::open_path(&dir);
+            }
+            "history-clear" => {
+                crate::history::clear();
+                if let Some(t) = &self.tray {
+                    t.set_history(&[]);
+                }
+            }
+            id if id.starts_with("history:") => {
+                let n: usize = id["history:".len()..].parse().unwrap_or(usize::MAX);
+                if let Some(entry) = crate::history::list().get(n) {
+                    match crate::history::load(&entry.path) {
+                        Ok(img) => {
+                            let ok = output::copy_image(&img).is_ok();
+                            let title = if ok {
+                                "Copied to clipboard"
+                            } else {
+                                "Could not copy to the clipboard"
+                            };
+                            self.toast(
+                                el,
+                                title.into(),
+                                format!("{} - click to open", entry.label()),
+                                Some(&img),
+                                Some(entry.path.clone()),
+                            );
+                        }
+                        Err(e) => self.toast(el, "Could not open the snip".into(), e, None, None),
+                    }
+                }
             }
             "settings" | "config" => self.open_settings(el),
             "update" => self.check_for_updates(),
@@ -1269,7 +1585,12 @@ impl App {
             self.cfg.delay_seconds,
             self.proxy.clone(),
         ) {
-            Ok(t) => self.tray = Some(t),
+            Ok(t) => {
+                if self.cfg.history {
+                    t.set_history(&crate::history::list());
+                }
+                self.tray = Some(t);
+            }
             Err(e) => eprintln!("krab: tray unavailable: {e}"),
         }
 
@@ -1676,6 +1997,10 @@ impl ApplicationHandler<UserEvent> for App {
                         kind: Kind::Record,
                         ..Request::default()
                     },
+                    Some(Slot::Text) => Request {
+                        text: true,
+                        ..Request::default()
+                    },
                     Some(_) => Request::default(),
                     None => return,
                 };
@@ -1721,6 +2046,30 @@ impl ApplicationHandler<UserEvent> for App {
                     Err(e) => self.toast(el, "Could not read text".into(), e, None, None),
                 }
             }
+            UserEvent::Redacted(result) => {
+                if let Some(session) = self.session.as_mut() {
+                    if let Some(win) = session.wins.iter_mut().find(|w| w.overlay.has_selection()) {
+                        win.overlay.apply_redactions(result);
+                        if win.overlay.take_dirty() {
+                            win.window.request_redraw();
+                        }
+                    }
+                }
+            }
+            UserEvent::HistoryChanged => {
+                if let Some(t) = &self.tray {
+                    t.set_history(&crate::history::list());
+                }
+            }
+            UserEvent::Scrolled(result) => {
+                self.scrolling = None;
+                self.huds
+                    .retain(|h| !matches!(h.hud, Hud::Scrolling { .. }));
+                match result {
+                    Ok(img) => self.pending = Some((Finish::Copy, img)),
+                    Err(e) => self.toast(el, "Scrolling capture failed".into(), e, None, None),
+                }
+            }
             UserEvent::Update(result, manual) => {
                 if let Some(sw) = &mut self.settings {
                     sw.ui.update_note = match &result {
@@ -1749,6 +2098,8 @@ impl ApplicationHandler<UserEvent> for App {
             self.hud_event(idx, event);
         } else if self.settings.as_ref().is_some_and(|s| s.window.id() == id) {
             self.settings_event(event);
+        } else if let Some(idx) = self.pins.iter().position(|p| p.window.id() == id) {
+            self.pin_event(el, idx, event);
         }
     }
 
@@ -1791,6 +2142,8 @@ mod tray {
             None,
             Some(("delay", format!("Snip in {delay} seconds"))),
             Some(("record", "Record screen".into())),
+            Some(("text", "Copy text from screen".into())),
+            Some(("scroll", "Scrolling capture".into())),
             None,
             Some(("folder", "Open screenshots folder".into())),
             Some(("settings", "Settings...".into())),
@@ -1800,10 +2153,17 @@ mod tray {
         ]
     }
 
+    /// How many recent snips the tray menu lists.
+    const RECENT: usize = 10;
+
     #[cfg(any(windows, target_os = "macos"))]
     pub struct Tray {
         icon: tray_icon::TrayIcon,
         snip: tray_icon::menu::MenuItem,
+        recent: tray_icon::menu::Submenu,
+        /// What `recent` holds now, to take it out again.
+        recent_items: std::cell::RefCell<Vec<tray_icon::menu::MenuItem>>,
+        recent_sep: std::cell::RefCell<Option<tray_icon::menu::PredefinedMenuItem>>,
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -1813,11 +2173,12 @@ mod tray {
             delay: u32,
             proxy: EventLoopProxy<UserEvent>,
         ) -> Result<Tray, String> {
-            use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+            use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
             use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
             let menu = Menu::new();
             let mut snip = None;
+            let recent = Submenu::with_id("recent", "Recent snips", true);
             for entry in entries(snip_hotkey, delay) {
                 match entry {
                     None => menu.append(&PredefinedMenuItem::separator()),
@@ -1825,6 +2186,9 @@ mod tray {
                         let item = MenuItem::with_id(id, &label, true, None);
                         if id == "snip" {
                             snip = Some(item.clone());
+                        }
+                        if id == "folder" {
+                            menu.append(&recent).map_err(|e| e.to_string())?;
                         }
                         menu.append(&item)
                     }
@@ -1858,10 +2222,55 @@ mod tray {
                 .with_icon(icon)
                 .build()
                 .map_err(|e| e.to_string())?;
-            Ok(Tray {
+            let tray = Tray {
                 icon,
                 snip: snip.ok_or("menu without snip entry")?,
-            })
+                recent,
+                recent_items: Default::default(),
+                recent_sep: Default::default(),
+            };
+            tray.set_history(&[]);
+            Ok(tray)
+        }
+
+        /// List the newest snips under "Recent snips".
+        pub fn set_history(&self, entries: &[crate::history::Entry]) {
+            use tray_icon::menu::{MenuItem, PredefinedMenuItem};
+            for item in self.recent_items.borrow_mut().drain(..) {
+                let _ = self.recent.remove(&item);
+            }
+            if let Some(sep) = self.recent_sep.borrow_mut().take() {
+                let _ = self.recent.remove(&sep);
+            }
+            let mut items = Vec::new();
+            for (i, e) in entries.iter().take(RECENT).enumerate() {
+                items.push(MenuItem::with_id(
+                    format!("history:{i}"),
+                    e.label(),
+                    true,
+                    None,
+                ));
+            }
+            if items.is_empty() {
+                items.push(MenuItem::with_id(
+                    "history-none",
+                    "No snips yet",
+                    false,
+                    None,
+                ));
+            }
+            for item in &items {
+                let _ = self.recent.append(item);
+            }
+            if !entries.is_empty() {
+                let sep = PredefinedMenuItem::separator();
+                let _ = self.recent.append(&sep);
+                let clear = MenuItem::with_id("history-clear", "Clear history", true, None);
+                let _ = self.recent.append(&clear);
+                items.push(clear);
+                *self.recent_sep.borrow_mut() = Some(sep);
+            }
+            *self.recent_items.borrow_mut() = items;
         }
 
         /// Show the current snip shortcut in the menu and tooltip.
@@ -1890,6 +2299,8 @@ mod tray {
         proxy: EventLoopProxy<UserEvent>,
         snip_hotkey: Option<String>,
         delay: u32,
+        /// Labels of the newest snips.
+        recent: Vec<String>,
     }
 
     #[cfg(target_os = "linux")]
@@ -1937,21 +2348,50 @@ mod tray {
         }
 
         fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
-            use ksni::menu::StandardItem;
-            entries(self.snip_hotkey.as_deref(), self.delay)
-                .into_iter()
-                .map(|e| match e {
-                    None => ksni::MenuItem::Separator,
-                    Some((id, label)) => StandardItem {
-                        label,
-                        activate: Box::new(move |t: &mut Sni| {
-                            let _ = t.proxy.send_event(UserEvent::Menu(id.to_string()));
-                        }),
-                        ..Default::default()
+            use ksni::menu::{StandardItem, SubMenu};
+            let item = |id: String, label: String, enabled: bool| -> ksni::MenuItem<Self> {
+                StandardItem {
+                    label,
+                    enabled,
+                    activate: Box::new(move |t: &mut Sni| {
+                        let _ = t.proxy.send_event(UserEvent::Menu(id.clone()));
+                    }),
+                    ..Default::default()
+                }
+                .into()
+            };
+            let mut recent: Vec<ksni::MenuItem<Self>> = self
+                .recent
+                .iter()
+                .enumerate()
+                .map(|(i, label)| item(format!("history:{i}"), label.clone(), true))
+                .collect();
+            if recent.is_empty() {
+                recent.push(item("history-none".into(), "No snips yet".into(), false));
+            } else {
+                recent.push(ksni::MenuItem::Separator);
+                recent.push(item("history-clear".into(), "Clear history".into(), true));
+            }
+            let mut out = Vec::new();
+            for e in entries(self.snip_hotkey.as_deref(), self.delay) {
+                match e {
+                    None => out.push(ksni::MenuItem::Separator),
+                    Some((id, label)) => {
+                        if id == "folder" {
+                            out.push(
+                                SubMenu {
+                                    label: "Recent snips".into(),
+                                    submenu: std::mem::take(&mut recent),
+                                    ..Default::default()
+                                }
+                                .into(),
+                            );
+                        }
+                        out.push(item(id.to_string(), label, true));
                     }
-                    .into(),
-                })
-                .collect()
+                }
+            }
+            out
         }
     }
 
@@ -1967,6 +2407,7 @@ mod tray {
                 proxy,
                 snip_hotkey: snip_hotkey.map(str::to_string),
                 delay,
+                recent: Vec::new(),
             };
             // Desktops without a tray (plain GNOME) simply do not show it.
             let handle = sni
@@ -1979,6 +2420,11 @@ mod tray {
         pub fn set_hotkey(&self, snip_hotkey: Option<&str>) {
             let h = snip_hotkey.map(str::to_string);
             self.handle.update(move |t| t.snip_hotkey = h);
+        }
+
+        pub fn set_history(&self, entries: &[crate::history::Entry]) {
+            let labels: Vec<String> = entries.iter().take(RECENT).map(|e| e.label()).collect();
+            self.handle.update(move |t| t.recent = labels);
         }
     }
 }

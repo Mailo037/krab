@@ -14,7 +14,14 @@ pub enum Tool {
     Rect,
     Ellipse,
     Text,
+    /// A speech bubble pointing at something.
+    Callout,
+    /// Numbered markers: 1, 2, 3...
+    Step,
+    /// A dimension line showing its length in pixels.
+    Measure,
     Pixelate,
+    Blur,
     Eraser,
     Pipette,
 }
@@ -31,6 +38,9 @@ impl Tool {
                 | Tool::Rect
                 | Tool::Ellipse
                 | Tool::Text
+                | Tool::Callout
+                | Tool::Step
+                | Tool::Measure
         )
     }
 }
@@ -55,6 +65,78 @@ pub enum Shape {
         size: f32,
     },
     Pixelate(RectF),
+    Blur(RectF),
+    /// A numbered marker of radius `r`.
+    Step {
+        at: Pt,
+        n: u32,
+        r: f32,
+    },
+    /// A bubble whose text starts at `pos` and whose tail points at `tip`.
+    Callout {
+        tip: Pt,
+        pos: Pt,
+        text: String,
+        size: f32,
+    },
+    /// A dimension line; `size` is the label's em size.
+    Measure {
+        a: Pt,
+        b: Pt,
+        size: f32,
+    },
+    /// A solid box (used to redact).
+    Fill(RectF),
+}
+
+/// Text colour that reads well on `bg`.
+fn ink_on(bg: Color) -> Color {
+    if bg.luma() > 170.0 {
+        Color::rgb(0x1C, 0x1C, 0x1E)
+    } else {
+        Color::WHITE
+    }
+}
+
+/// The bubble of a callout whose text starts at `pos`.
+pub fn callout_box(pos: Pt, text: &str, size: f32) -> RectF {
+    let (tw, th) = text_size(if text.is_empty() { " " } else { text }, size);
+    let pad = size * 0.55;
+    RectF::new(
+        pos.x - pad,
+        pos.y - pad * 0.6,
+        tw.max(size * 0.5) + 2.0 * pad,
+        th + 1.2 * pad,
+    )
+}
+
+/// "240 px", plus the horizontal and vertical extent when slanted.
+pub fn measure_label(a: Pt, b: Pt) -> String {
+    let (dx, dy) = ((b.x - a.x).abs().round(), (b.y - a.y).abs().round());
+    let len = a.dist(b).round();
+    if dx >= 1.0 && dy >= 1.0 {
+        format!("{len} px  \u{00B7}  {dx} \u{00D7} {dy}")
+    } else {
+        format!("{len} px")
+    }
+}
+
+/// Where the label of a dimension line goes.
+fn measure_label_rect(a: Pt, b: Pt, size: f32) -> RectF {
+    let label = measure_label(a, b);
+    let tw = text::ui().measure(&label, size);
+    let (w, h) = (tw + size * 1.2, size * 1.9);
+    let mid = a.lerp(b, 0.5);
+    let len = a.dist(b).max(0.01);
+    // Beside the line, on its upper / left side.
+    let (mut nx, mut ny) = (-(b.y - a.y) / len, (b.x - a.x) / len);
+    if ny > 0.0 || (ny == 0.0 && nx > 0.0) {
+        nx = -nx;
+        ny = -ny;
+    }
+    // Far enough along the normal that the whole label clears the line.
+    let off = (nx.abs() * w + ny.abs() * h) / 2.0 + size * 0.5;
+    RectF::new(mid.x + nx * off - w / 2.0, mid.y + ny * off - h / 2.0, w, h)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -185,6 +267,91 @@ impl Annotation {
                     (9.0 * scale).round() as i32,
                 );
             }
+            Shape::Blur(r) => {
+                c.blur(
+                    src.px,
+                    src.w,
+                    src.h,
+                    r.round(),
+                    (7.0 * scale).round() as i32,
+                );
+            }
+            Shape::Fill(r) => c.fill_rect(*r, self.color),
+            Shape::Step { at, n, r } => {
+                c.fill_circle(*at, *r, self.color);
+                c.stroke_circle(
+                    *at,
+                    *r,
+                    (r * 0.11).max(1.0),
+                    Color::rgba(255, 255, 255, 230),
+                );
+                let label = n.to_string();
+                let em = r * if label.len() > 1 { 0.92 } else { 1.12 };
+                text::ui().draw_centered(c, &label, at.x, at.y, em, ink_on(self.color));
+            }
+            Shape::Callout {
+                tip,
+                pos,
+                text: body,
+                size,
+            } => {
+                let b = callout_box(*pos, body, *size);
+                if !b.contains(*tip) {
+                    let mid = b.center();
+                    let len = mid.dist(*tip).max(0.01);
+                    let (nx, ny) = (-(tip.y - mid.y) / len, (tip.x - mid.x) / len);
+                    let half = (b.w.min(b.h) * 0.22).max(4.0);
+                    let mut pb = PathBuilder::new();
+                    pb.move_to(mid.x + nx * half, mid.y + ny * half);
+                    pb.line_to(tip.x, tip.y);
+                    pb.line_to(mid.x - nx * half, mid.y - ny * half);
+                    pb.close();
+                    if let Some(p) = pb.finish() {
+                        c.fill_path(&p, self.color);
+                    }
+                }
+                c.fill_rrect(b, size * 0.5, self.color);
+                let face = text::ui();
+                let m = face.metrics(*size);
+                for (i, line) in body.split('\n').enumerate() {
+                    face.draw(
+                        c,
+                        line,
+                        pos.x,
+                        pos.y + m.ascent + i as f32 * m.line_height,
+                        *size,
+                        ink_on(self.color),
+                    );
+                }
+            }
+            Shape::Measure { a, b, size } => {
+                let len = a.dist(*b);
+                if len < 0.5 {
+                    return;
+                }
+                let w = self.width.clamp(1.0, 3.0 * scale);
+                let (ux, uy) = ((b.x - a.x) / len, (b.y - a.y) / len);
+                let tick = 5.0 * scale + w;
+                c.line(*a, *b, w, self.color);
+                for e in [a, b] {
+                    c.line(
+                        Pt::new(e.x - uy * tick, e.y + ux * tick),
+                        Pt::new(e.x + uy * tick, e.y - ux * tick),
+                        w,
+                        self.color,
+                    );
+                }
+                let r = measure_label_rect(*a, *b, *size);
+                c.fill_rrect(r, r.h / 2.0, Color::rgba(0x14, 0x15, 0x18, 225));
+                text::ui().draw_centered(
+                    c,
+                    &measure_label(*a, *b),
+                    r.center().x,
+                    r.center().y,
+                    *size,
+                    Color::WHITE,
+                );
+            }
         }
     }
 
@@ -204,7 +371,19 @@ impl Annotation {
             }
             Shape::Line { a, b, .. } => RectF::from_points(*a, *b).inflate(self.width * 2.0),
             Shape::Rect(r) | Shape::Ellipse(r) => r.inflate(self.width / 2.0),
-            Shape::Pixelate(r) => *r,
+            Shape::Pixelate(r) | Shape::Blur(r) | Shape::Fill(r) => *r,
+            Shape::Step { at, r, .. } => {
+                RectF::new(at.x - r, at.y - r, 2.0 * r, 2.0 * r).inflate(1.0)
+            }
+            Shape::Callout {
+                tip,
+                pos,
+                text,
+                size,
+            } => callout_box(*pos, text, *size).union(&RectF::new(tip.x, tip.y, 0.0, 0.0)),
+            Shape::Measure { a, b, size } => RectF::from_points(*a, *b)
+                .inflate(self.width * 2.0 + 8.0)
+                .union(&measure_label_rect(*a, *b, *size)),
             Shape::Text { pos, text, size } => {
                 let (w, h) = text_size(text, *size);
                 RectF::new(pos.x, pos.y, w, h)
@@ -242,7 +421,23 @@ impl Annotation {
                 let d = (((p.x - c.x) / rx).powi(2) + ((p.y - c.y) / ry).powi(2)).sqrt();
                 (d - 1.0).abs() * rx.min(ry) <= tol + self.width / 2.0
             }
-            Shape::Text { .. } | Shape::Pixelate(_) => self.bounds().inflate(tol).contains(p),
+            Shape::Text { .. } | Shape::Pixelate(_) | Shape::Blur(_) | Shape::Fill(_) => {
+                self.bounds().inflate(tol).contains(p)
+            }
+            Shape::Step { at, r, .. } => at.dist(p) <= r + tol,
+            Shape::Callout {
+                tip,
+                pos,
+                text,
+                size,
+            } => {
+                let b = callout_box(*pos, text, *size);
+                b.inflate(tol).contains(p) || dist_to_segment(p, b.center(), *tip) <= tol + 3.0
+            }
+            Shape::Measure { a, b, size } => {
+                dist_to_segment(p, *a, *b) <= tol + self.width
+                    || measure_label_rect(*a, *b, *size).contains(p)
+            }
         }
     }
 }
@@ -304,6 +499,80 @@ mod tests {
         assert_eq!(buf[(20 * w + 40) as usize], 0xFFFF_0000, "shaft");
         assert_eq!(buf[(20 * w + 66) as usize], 0xFFFF_0000, "head");
         assert_eq!(buf[(5 * w + 40) as usize], 0xFF00_0000, "untouched");
+    }
+
+    #[test]
+    fn new_shapes_draw_inside_their_bounds() {
+        let (w, h) = (300u32, 220u32);
+        let shapes = [
+            Shape::Step {
+                at: Pt::new(150.0, 110.0),
+                n: 12,
+                r: 16.0,
+            },
+            Shape::Callout {
+                tip: Pt::new(40.0, 190.0),
+                pos: Pt::new(120.0, 60.0),
+                text: "Look here\nand here".into(),
+                size: 16.0,
+            },
+            Shape::Measure {
+                a: Pt::new(40.0, 150.0),
+                b: Pt::new(260.0, 90.0),
+                size: 12.0,
+            },
+            Shape::Blur(RectF::new(60.0, 40.0, 120.0, 80.0)),
+            Shape::Fill(RectF::new(10.0, 10.0, 30.0, 12.0)),
+        ];
+        let src_px: Vec<u32> = (0..w * h)
+            .map(|i| {
+                if (i % w / 4 + i / w / 4) % 2 == 0 {
+                    0xFF00_0000
+                } else {
+                    0xFFFF_FFFF
+                }
+            })
+            .collect();
+        for shape in shapes {
+            let a = ann(shape);
+            let mut buf = src_px.clone();
+            let src = Source { px: &src_px, w, h };
+            a.draw(&mut Canvas::new(&mut buf, w, h), &src, 1.0);
+            let b = a.bounds().inflate(1.5);
+            let mut changed = 0;
+            for (i, (p, q)) in buf.iter().zip(&src_px).enumerate() {
+                if p != q {
+                    changed += 1;
+                    let (x, y) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+                    assert!(
+                        b.contains(Pt::new(x, y)),
+                        "{:?} drew outside {b:?} at {x},{y}",
+                        a.shape
+                    );
+                }
+            }
+            assert!(changed > 50, "{:?} drew almost nothing", a.shape);
+            let probe = match &a.shape {
+                Shape::Callout {
+                    pos, text, size, ..
+                } => callout_box(*pos, text, *size).center(),
+                Shape::Measure { a, b, .. } => a.lerp(*b, 0.5),
+                _ => b.center(),
+            };
+            assert!(a.hit(probe, 4.0), "{:?} not hit at {probe:?}", a.shape);
+        }
+    }
+
+    #[test]
+    fn measure_label_reads_length_and_extent() {
+        assert_eq!(
+            measure_label(Pt::new(0.0, 0.0), Pt::new(120.0, 0.0)),
+            "120 px"
+        );
+        assert_eq!(
+            measure_label(Pt::new(0.0, 0.0), Pt::new(30.0, 40.0)),
+            "50 px  \u{00B7}  30 \u{00D7} 40"
+        );
     }
 
     #[test]

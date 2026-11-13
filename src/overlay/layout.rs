@@ -21,6 +21,8 @@ pub(super) struct Bar {
 #[derive(Default)]
 pub(super) struct Bars {
     pub main: Option<Bar>,
+    /// Second row of the toolbar on screens too narrow for one.
+    pub main2: Option<Bar>,
     pub props: Option<Bar>,
     /// The main bar sits above the selection (affects label placement).
     pub above: bool,
@@ -28,7 +30,10 @@ pub(super) struct Bars {
 
 impl Bars {
     pub fn iter(&self) -> impl Iterator<Item = &Bar> {
-        self.main.iter().chain(self.props.iter())
+        self.main
+            .iter()
+            .chain(self.main2.iter())
+            .chain(self.props.iter())
     }
 
     pub fn hit(&self, p: Pt) -> Option<Btn> {
@@ -66,7 +71,12 @@ const TOOL_BAR: &[Option<Btn>] = &[
     Some(Btn::Tool(Tool::Rect)),
     Some(Btn::Tool(Tool::Ellipse)),
     Some(Btn::Tool(Tool::Text)),
+    Some(Btn::Tool(Tool::Callout)),
+    Some(Btn::Tool(Tool::Step)),
+    Some(Btn::Tool(Tool::Measure)),
+    None,
     Some(Btn::Tool(Tool::Pixelate)),
+    Some(Btn::Tool(Tool::Blur)),
     Some(Btn::Tool(Tool::Eraser)),
     Some(Btn::Tool(Tool::Pipette)),
     None,
@@ -74,12 +84,21 @@ const TOOL_BAR: &[Option<Btn>] = &[
     Some(Btn::Redo),
     None,
     Some(Btn::Ocr),
+    Some(Btn::Redact),
+    Some(Btn::Frame),
+    Some(Btn::Pin),
     Some(Btn::Open),
     Some(Btn::Save),
     None,
     Some(Btn::Copy),
     Some(Btn::Cancel),
 ];
+
+/// Number of buttons on the markup toolbar.
+#[cfg(test)]
+pub(super) fn tool_bar_len() -> usize {
+    TOOL_BAR.iter().flatten().count()
+}
 
 const PROPS_BAR: &[Option<Btn>] = &[
     Some(Btn::Color(0)),
@@ -120,6 +139,10 @@ impl Overlay {
                 Tool::Rect => Icon::Rect,
                 Tool::Ellipse => Icon::Ellipse,
                 Tool::Text => Icon::Text,
+                Tool::Callout => Icon::Callout,
+                Tool::Step => Icon::Step,
+                Tool::Measure => Icon::Ruler,
+                Tool::Blur => Icon::Blur,
                 Tool::Pixelate => Icon::Pixelate,
                 Tool::Eraser => Icon::Eraser,
                 Tool::Pipette => Icon::Pipette,
@@ -127,6 +150,9 @@ impl Overlay {
             Btn::Undo => Icon::Undo,
             Btn::Redo => Icon::Redo,
             Btn::Ocr => Icon::TextScan,
+            Btn::Redact => Icon::Redact,
+            Btn::Frame => Icon::Frame,
+            Btn::Pin => Icon::Pin,
             Btn::Open => Icon::External,
             Btn::Save => Icon::Save,
             Btn::Copy => Icon::Copy,
@@ -162,6 +188,10 @@ impl Overlay {
                 Tool::Rect => "Rectangle   R",
                 Tool::Ellipse => "Ellipse   E",
                 Tool::Text => "Text   T",
+                Tool::Callout => "Callout   K",
+                Tool::Step => "Step number   N",
+                Tool::Measure => "Measure   M",
+                Tool::Blur => "Blur   G",
                 Tool::Pixelate => "Pixelate   B",
                 Tool::Eraser => "Eraser   X",
                 Tool::Pipette => "Color picker   I",
@@ -170,6 +200,9 @@ impl Overlay {
             Btn::Undo => "Undo   Ctrl+Z".into(),
             Btn::Redo => "Redo   Ctrl+Y".into(),
             Btn::Ocr => "Copy text / QR code".into(),
+            Btn::Redact => "Hide e-mails, numbers and keys".into(),
+            Btn::Frame => "Background frame   F".into(),
+            Btn::Pin => "Pin to screen   Ctrl+T".into(),
             Btn::Open => "Open in default app".into(),
             Btn::Save => "Save as...   Ctrl+S".into(),
             Btn::Copy => "Copy   Enter".into(),
@@ -249,6 +282,7 @@ impl Overlay {
             let bar = self.build_bar(MODE_BAR, (sw - w) / 2.0, 18.0 * s, btn_h);
             return Bars {
                 main: Some(bar),
+                main2: None,
                 props: None,
                 above: false,
             };
@@ -256,32 +290,46 @@ impl Overlay {
 
         let record = self.ui.kind == Kind::Record;
         let items = if record { RECORD_BAR } else { TOOL_BAR };
-        let (mw, mh) = self.bar_size(items, btn_h);
-        let props_h = 26.0 * s;
-        let (pw, ph) = self.bar_size(PROPS_BAR, props_h);
         let gap = 8.0 * s;
         let margin = 8.0 * s;
+        let row_gap = 4.0 * s;
+        // Too wide for the screen: break the toolbar at a separator.
+        let rows = self.split_rows(items, btn_h, sw - 2.0 * margin);
+        let (mw, mh) = self.bar_size(rows[0], btn_h);
+        let block_h = rows.len() as f32 * mh + (rows.len() - 1) as f32 * row_gap;
+        let props_h = 26.0 * s;
+        let (pw, ph) = self.bar_size(PROPS_BAR, props_h);
         // Always reserve room for the properties bar so the toolbar does not
         // jump when switching between tools.
         let reserve = if record { 0.0 } else { ph + gap * 0.75 };
 
         let r = sel.rect;
         let below_y = r.bottom() + gap;
-        let above_y = r.y - gap - mh;
-        let (my, above, props_below) = if below_y + mh + reserve <= sh - margin {
+        let above_y = r.y - gap - block_h;
+        let (my, above, props_below) = if below_y + block_h + reserve <= sh - margin {
             (below_y, false, true)
         } else if above_y - reserve >= margin {
             (above_y, true, false)
         } else {
             // No room outside: tuck the bars inside the bottom edge.
-            ((r.bottom() - gap - mh).min(sh - margin - mh), false, false)
+            (
+                (r.bottom() - gap - block_h).min(sh - margin - block_h),
+                false,
+                false,
+            )
         };
-        let mx = (r.right() - mw).clamp(margin, (sw - mw - margin).max(margin));
-        let main = self.build_bar(items, mx, my, btn_h);
+        let place = |row: &[Option<Btn>], y: f32| {
+            let (w, _) = self.bar_size(row, btn_h);
+            let x = (r.right() - w).clamp(margin, (sw - w - margin).max(margin));
+            self.build_bar(row, x, y, btn_h)
+        };
+        let main = place(rows[0], my);
+        let main2 = rows.get(1).map(|row| place(row, my + mh + row_gap));
+        let mx = main.rect.x;
 
         let props = (!record && self.tool.has_style()).then(|| {
             let py = if props_below {
-                my + mh + gap * 0.75
+                my + block_h + gap * 0.75
             } else {
                 my - gap * 0.75 - ph
             };
@@ -290,8 +338,36 @@ impl Overlay {
         });
         Bars {
             main: Some(main),
+            main2,
             props,
             above,
+        }
+    }
+
+    /// One row if `items` fit into `avail`, else two rows broken at the
+    /// separator that balances them best.
+    fn split_rows<'a>(
+        &self,
+        items: &'a [Option<Btn>],
+        btn_h: f32,
+        avail: f32,
+    ) -> Vec<&'a [Option<Btn>]> {
+        if self.bar_size(items, btn_h).0 <= avail {
+            return vec![items];
+        }
+        let best = items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.is_none())
+            .map(|(i, _)| {
+                let a = self.bar_size(&items[..i], btn_h).0;
+                let b = self.bar_size(&items[i + 1..], btn_h).0;
+                (i, a.max(b))
+            })
+            .min_by(|x, y| x.1.total_cmp(&y.1));
+        match best {
+            Some((i, _)) => vec![&items[..i], &items[i + 1..]],
+            None => vec![items],
         }
     }
 }

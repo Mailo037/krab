@@ -13,16 +13,24 @@ pub enum Slot {
     Snip,
     SnipAlt,
     Record,
+    Text,
 }
 
+/// How many shortcuts Krab offers.
+pub const SLOTS: usize = 4;
+
+/// The registration result of every slot, in [`Slot::ALL`] order.
+pub type Statuses = [Status; SLOTS];
+
 impl Slot {
-    pub const ALL: [Slot; 3] = [Slot::Snip, Slot::SnipAlt, Slot::Record];
+    pub const ALL: [Slot; SLOTS] = [Slot::Snip, Slot::SnipAlt, Slot::Record, Slot::Text];
 
     pub fn label(self) -> &'static str {
         match self {
             Slot::Snip => "New snip",
             Slot::SnipAlt => "New snip (second shortcut)",
             Slot::Record => "Record screen",
+            Slot::Text => "Copy text from screen",
         }
     }
 
@@ -31,6 +39,7 @@ impl Slot {
             Slot::Snip => &cfg.hotkey,
             Slot::SnipAlt => &cfg.hotkey_alt,
             Slot::Record => &cfg.hotkey_record,
+            Slot::Text => &cfg.hotkey_text,
         }
     }
 
@@ -39,6 +48,7 @@ impl Slot {
             Slot::Snip => cfg.hotkey = spec,
             Slot::SnipAlt => cfg.hotkey_alt = spec,
             Slot::Record => cfg.hotkey_record = spec,
+            Slot::Text => cfg.hotkey_text = spec,
         }
     }
 }
@@ -124,9 +134,9 @@ impl Hotkeys {
     }
 
     /// Register the shortcuts from `cfg`, replacing the current ones.
-    pub fn apply(&mut self, cfg: &Config) -> [Status; 3] {
+    pub fn apply(&mut self, cfg: &Config) -> Statuses {
         self.suspend();
-        let mut out = [Status::Off, Status::Off, Status::Off];
+        let mut out: Statuses = std::array::from_fn(|_| Status::Off);
         let mut seen: Vec<HotKey> = Vec::new();
         for (i, slot) in Slot::ALL.iter().enumerate() {
             let spec = slot.get(cfg).trim();

@@ -751,3 +751,34 @@ pub mod clipboard {
         ok
     }
 }
+
+/// Turn the mouse wheel by `notches` (negative scrolls down) over the
+/// screen point `at`. Returns whether this platform can scroll by itself;
+/// zero notches only asks that.
+pub fn scroll_wheel_at(at: (i32, i32), notches: i32) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SetCursorPos;
+    if notches == 0 {
+        return true;
+    }
+    unsafe {
+        // The wheel scrolls whatever is under the pointer.
+        SetCursorPos(at.0, at.1);
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: (notches * 120) as u32,
+                    dwFlags: MOUSEEVENTF_WHEEL,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        SendInput(1, &input, size_of::<INPUT>() as i32) == 1
+    }
+}

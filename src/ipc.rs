@@ -18,6 +18,10 @@ pub struct Request {
     pub delay: u32,
     /// Override `after_capture`: `Some(true)` copies immediately.
     pub quick: Option<bool>,
+    /// Copy the text in the selected area instead of the picture.
+    pub text: bool,
+    /// Scroll the selected area and stitch it into one tall image.
+    pub scroll: bool,
 }
 
 impl Default for Request {
@@ -27,6 +31,8 @@ impl Default for Request {
             kind: Kind::Snip,
             delay: 0,
             quick: None,
+            text: false,
+            scroll: false,
         }
     }
 }
@@ -51,7 +57,7 @@ impl Message {
             Message::Settings => "settings".into(),
             Message::Updated(path) => format!("updated {path}"),
             Message::Snip(r) => format!(
-                "snip mode={} kind={} delay={} quick={}",
+                "snip mode={} kind={} delay={} quick={} text={} scroll={}",
                 r.mode.map(Mode::as_str).unwrap_or("default"),
                 if r.kind == Kind::Record {
                     "record"
@@ -64,6 +70,8 @@ impl Message {
                     Some(false) => "no",
                     None => "default",
                 },
+                if r.text { "yes" } else { "no" },
+                if r.scroll { "yes" } else { "no" },
             ),
         }
     }
@@ -92,6 +100,8 @@ impl Message {
                             }
                         }
                         "delay" => r.delay = v.parse().ok()?,
+                        "text" => r.text = v == "yes",
+                        "scroll" => r.scroll = v == "yes",
                         "quick" => {
                             r.quick = match v {
                                 "yes" => Some(true),
@@ -188,12 +198,24 @@ mod tests {
                 kind: Kind::Record,
                 delay: 5,
                 quick: Some(true),
+                text: false,
+                scroll: false,
+            }),
+            Message::Snip(Request {
+                text: true,
+                ..Request::default()
+            }),
+            Message::Snip(Request {
+                scroll: true,
+                ..Request::default()
             }),
             Message::Snip(Request {
                 mode: Some(Mode::Freeform),
                 kind: Kind::Snip,
                 delay: 0,
                 quick: Some(false),
+                text: false,
+                scroll: false,
             }),
         ];
         for m in cases {

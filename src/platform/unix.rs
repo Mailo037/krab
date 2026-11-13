@@ -128,6 +128,12 @@ pub fn mouse_down() -> bool {
     false
 }
 
+/// Applications cannot scroll other windows here: scrolling captures ask
+/// the user to scroll.
+pub fn scroll_wheel_at(_at: (i32, i32), _notches: i32) -> bool {
+    false
+}
+
 impl Grabber {
     /// The pointer is not drawn: the platform capture leaves it out.
     pub fn new(

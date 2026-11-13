@@ -1,6 +1,9 @@
 //! Where finished snips go: clipboard, disk, other apps.
 
 use crate::config::Config;
+use crate::geom::{Pt, RectF};
+use crate::gfx::{Canvas, Color};
+#[cfg(not(windows))]
 use std::borrow::Cow;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -82,6 +85,43 @@ impl Image {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
+    }
+}
+
+/// Put `img` on a gradient from `a` to `b`, with padding, rounded corners
+/// and a soft shadow - ready for slides, docs and social media.
+pub fn frame(img: &Image, a: Color, b: Color, scale: f32) -> Image {
+    let s = scale.max(1.0);
+    let pad = (img.w.max(img.h) as f32 * 0.07)
+        .clamp(28.0 * s, 140.0 * s)
+        .round() as u32;
+    let (w, h) = (img.w + 2 * pad, img.h + 2 * pad);
+    let mut buf = vec![0u32; (w * h) as usize];
+    // The snip, premultiplied like everything tiny-skia draws.
+    let px: Vec<u32> = img
+        .rgba
+        .chunks_exact(4)
+        .map(|p| {
+            let al = p[3] as u32;
+            let m = |c: u8| (c as u32 * al + 127) / 255;
+            al << 24 | m(p[0]) << 16 | m(p[1]) << 8 | m(p[2])
+        })
+        .collect();
+    {
+        let mut c = Canvas::new(&mut buf, w, h);
+        let full = RectF::new(0.0, 0.0, w as f32, h as f32);
+        if let Some(path) = crate::gfx::rrect_path(full, 0.0) {
+            c.fill_path_gradient(&path, Pt::new(0.0, 0.0), a, Pt::new(w as f32, h as f32), b);
+        }
+        let dst = RectF::new(pad as f32, pad as f32, img.w as f32, img.h as f32);
+        let radius = (10.0 * s).min(img.w.min(img.h) as f32 / 4.0);
+        c.shadow(dst, radius, 22.0 * s, 0.9);
+        c.draw_image(&px, img.w, img.h, dst, radius);
+    }
+    Image {
+        w,
+        h,
+        rgba: crate::gfx::premul_argb_to_rgba(&buf),
     }
 }
 

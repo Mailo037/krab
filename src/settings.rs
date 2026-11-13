@@ -55,6 +55,10 @@ enum Toggle {
     Background,
     Autostart,
     AutoUpdate,
+    Frame,
+    History,
+    RecordCursor,
+    RecordClicks,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +66,9 @@ enum Choice {
     AfterCapture,
     Format,
     Mode,
+    ColorFormat,
+    Audio,
+    Encoder,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +98,14 @@ const MODES: [(&str, &str); 4] = [
     ("full", "Screen"),
     ("freeform", "Freeform"),
 ];
+const COLOR_FORMATS: [(&str, &str); 3] = [("hex", "HEX"), ("rgb", "RGB"), ("hsl", "HSL")];
+const AUDIO: [(&str, &str); 4] = [
+    ("off", "Off"),
+    ("system", "Computer"),
+    ("mic", "Mic"),
+    ("both", "Both"),
+];
+const ENCODERS: [(&str, &str); 2] = [("auto", "Graphics card"), ("software", "CPU")];
 
 impl Choice {
     fn options(self) -> &'static [(&'static str, &'static str)] {
@@ -98,6 +113,9 @@ impl Choice {
             Choice::AfterCapture => &AFTER_CAPTURE,
             Choice::Format => &FORMATS,
             Choice::Mode => &MODES,
+            Choice::ColorFormat => &COLOR_FORMATS,
+            Choice::Audio => &AUDIO,
+            Choice::Encoder => &ENCODERS,
         }
     }
 
@@ -112,6 +130,9 @@ impl Choice {
             }
             Choice::Format => &cfg.file_format,
             Choice::Mode => &cfg.default_mode,
+            Choice::ColorFormat => &cfg.color_format,
+            Choice::Audio => &cfg.record_audio,
+            Choice::Encoder => &cfg.record_encoder,
         }
     }
 
@@ -120,6 +141,9 @@ impl Choice {
             Choice::AfterCapture => cfg.after_capture = v.into(),
             Choice::Format => cfg.file_format = v.into(),
             Choice::Mode => cfg.default_mode = v.into(),
+            Choice::ColorFormat => cfg.color_format = v.into(),
+            Choice::Audio => cfg.record_audio = v.into(),
+            Choice::Encoder => cfg.record_encoder = v.into(),
         }
     }
 }
@@ -140,6 +164,10 @@ impl Toggle {
                 }
             }
             Toggle::Autostart => "Start when I log in",
+            Toggle::Frame => "Put snips on a background",
+            Toggle::History => "Remember recent snips in the tray",
+            Toggle::RecordCursor => "Show the mouse pointer",
+            Toggle::RecordClicks => "Highlight the pointer and clicks",
             Toggle::AutoUpdate => "Install updates automatically",
         }
     }
@@ -168,7 +196,7 @@ impl Row {
 pub struct Settings {
     pub cfg: Config,
     /// Result of registering each shortcut (in [`Slot::ALL`] order).
-    pub status: [Status; 3],
+    pub status: crate::hotkey::Statuses,
     pub autostart: bool,
     /// Windows grabs Print Screen for its own Snipping Tool.
     pub windows_snipping: bool,
@@ -189,7 +217,12 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn new(cfg: Config, status: [Status; 3], autostart: bool, windows_snipping: bool) -> Self {
+    pub fn new(
+        cfg: Config,
+        status: crate::hotkey::Statuses,
+        autostart: bool,
+        windows_snipping: bool,
+    ) -> Self {
         Settings {
             cfg,
             status,
@@ -246,6 +279,8 @@ impl Settings {
                     Row::Choice(Choice::Format, "File format"),
                     Row::Toggle(Toggle::Notifications),
                     Row::Toggle(Toggle::Border),
+                    Row::Toggle(Toggle::Frame),
+                    Row::Toggle(Toggle::History),
                 ],
             ),
             (
@@ -253,6 +288,16 @@ impl Settings {
                 vec![
                     Row::Choice(Choice::Mode, "Start with"),
                     Row::Toggle(Toggle::Loupe),
+                    Row::Choice(Choice::ColorFormat, "Colour picker copies"),
+                ],
+            ),
+            (
+                "Recording",
+                vec![
+                    Row::Choice(Choice::Audio, "Sound"),
+                    Row::Toggle(Toggle::RecordCursor),
+                    Row::Toggle(Toggle::RecordClicks),
+                    Row::Choice(Choice::Encoder, "Encode with"),
                 ],
             ),
             (
@@ -278,6 +323,10 @@ impl Settings {
             Toggle::Background => c.run_in_background,
             Toggle::Autostart => self.autostart,
             Toggle::AutoUpdate => c.auto_update,
+            Toggle::Frame => c.frame,
+            Toggle::History => c.history,
+            Toggle::RecordCursor => c.record_cursor,
+            Toggle::RecordClicks => c.record_clicks,
         }
     }
 
@@ -377,6 +426,10 @@ impl Settings {
                     Toggle::Loupe => &mut c.loupe,
                     Toggle::Background => &mut c.run_in_background,
                     Toggle::AutoUpdate => &mut c.auto_update,
+                    Toggle::Frame => &mut c.frame,
+                    Toggle::History => &mut c.history,
+                    Toggle::RecordCursor => &mut c.record_cursor,
+                    Toggle::RecordClicks => &mut c.record_clicks,
                     Toggle::Autostart => unreachable!(),
                 };
                 *v = !*v;
@@ -798,7 +851,7 @@ mod tests {
         };
         Settings::new(
             cfg,
-            [Status::Active, Status::Taken, Status::Off],
+            [Status::Active, Status::Taken, Status::Off, Status::Off],
             false,
             false,
         )
