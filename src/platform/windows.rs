@@ -7,7 +7,7 @@ use crate::geom::RectI;
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
-use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_CLOAK, DWMWA_CLOAKED,
     DWMWA_EXTENDED_FRAME_BOUNDS,
@@ -22,10 +22,11 @@ use windows_sys::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
 };
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AllowSetForegroundWindow, EnumWindows, GetClassNameW, GetCursorPos, GetMessagePos,
     GetWindowLongW, GetWindowRect, GetWindowTextW, IsIconic, IsWindowVisible, ASFW_ANY,
-    GWL_EXSTYLE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    GWL_EXSTYLE, WM_NCACTIVATE, WM_NCDESTROY, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 
 const MONITORINFOF_PRIMARY: u32 = 1;
@@ -73,6 +74,49 @@ pub fn cloak(window: &winit::window::Window, on: bool) {
             &value as *const BOOL as *const c_void,
             size_of::<BOOL>() as u32,
         );
+    }
+}
+
+/// Stop Windows from painting a classic title bar into a borderless window.
+///
+/// When a window gains or loses activation, `DefWindowProc` handles
+/// `WM_NCACTIVATE` by drawing an old-style caption ("Krab" on a light-blue
+/// gradient) straight into the window's pixels, even though our windows have
+/// no caption style. It stays there until the next frame is presented, which
+/// showed as a bar flashing across the top of the overlay on every snip.
+/// Passing `-1` as `lParam` tells `DefWindowProc` not to repaint the
+/// non-client area; everything else about the message (winit's focus
+/// tracking, the return value) is unchanged.
+pub fn suppress_caption_paint(window: &winit::window::Window) {
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        SetWindowSubclass(h.hwnd.get() as HWND, Some(no_caption_proc), NO_CAPTION_ID, 0);
+    }
+}
+
+const NO_CAPTION_ID: usize = 0x4B52_4142; // "KRAB"
+
+unsafe extern "system" fn no_caption_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    match msg {
+        WM_NCACTIVATE => DefSubclassProc(hwnd, msg, wparam, -1),
+        WM_NCDESTROY => {
+            RemoveWindowSubclass(hwnd, Some(no_caption_proc), NO_CAPTION_ID);
+            DefSubclassProc(hwnd, msg, wparam, lparam)
+        }
+        _ => DefSubclassProc(hwnd, msg, wparam, lparam),
     }
 }
 

@@ -15,6 +15,9 @@ pub fn allow_foreground_handoff() {}
 /// Only needed on Windows, see the Windows back-end.
 pub fn cloak(_window: &winit::window::Window, _on: bool) {}
 
+/// Only needed on Windows, see the Windows back-end.
+pub fn suppress_caption_paint(_window: &winit::window::Window) {}
+
 pub fn cursor_pos() -> Option<(i32, i32)> {
     None
 }

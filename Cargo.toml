@@ -1,6 +1,6 @@
 [package]
 name = "krab"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 description = "Krab - a lightweight snipping tool that opens in milliseconds"
 license = "MIT"
@@ -50,6 +50,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Console",
     "Win32_System_Threading",
     "Win32_System_Registry",
+    "Win32_UI_Shell",
 ] }
 windows = { version = "0.61", features = [
     "Foundation",

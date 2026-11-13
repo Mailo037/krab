@@ -282,7 +282,9 @@ fn create_overlay_window(
         use winit::platform::macos::WindowAttributesExtMacOS;
         attrs = attrs.with_has_shadow(false);
     }
-    el.create_window(attrs).ok().map(Rc::new)
+    let window = el.create_window(attrs).ok()?;
+    crate::platform::suppress_caption_paint(&window);
+    Some(Rc::new(window))
 }
 
 fn draw_overlay(win: &mut OverlayWin) {
@@ -818,6 +820,7 @@ impl App {
         let Ok(window) = el.create_window(attrs) else {
             return;
         };
+        crate::platform::suppress_caption_paint(&window);
         let window = Rc::new(window);
         if matches!(hud, Hud::Recording { .. }) {
             // Keep the indicator out of the recording itself.
@@ -1314,6 +1317,7 @@ impl App {
         let Ok(window) = el.create_window(attrs) else {
             return;
         };
+        crate::platform::suppress_caption_paint(&window);
         let window = Rc::new(window);
         let Some(context) = self.context(el) else {
             return;
