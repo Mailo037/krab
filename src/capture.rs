@@ -91,6 +91,8 @@ pub struct Capture {
     pub windows: Vec<WinInfo>,
     /// Pointer position in native desktop units, when the platform exposes it.
     pub cursor: Option<(i32, i32)>,
+    /// The window that had the focus, when asked for and found in `windows`.
+    pub active: Option<u64>,
     /// Covered windows being rendered since the capture (see [`Capture::precapture`]).
     pub precaptured: Option<WindowCache>,
 }
@@ -105,11 +107,19 @@ impl Capture {
     }
 }
 
-/// Grab every monitor plus the window list.
-pub fn capture_all() -> Result<Capture, String> {
+/// Grab every monitor plus the window list; with `active`, also note which
+/// window has the focus.
+pub fn capture_all(active: bool) -> Result<Capture, String> {
     // Windows are listed first: it is quick, and it must happen before our own
-    // overlay exists.
+    // overlay exists (and takes the focus).
     let windows = platform::list_windows();
+    let active = active
+        .then(|| {
+            platform::foreground_windows()
+                .into_iter()
+                .find(|id| windows.iter().any(|w| w.id == *id))
+        })
+        .flatten();
     let cursor = platform::cursor_pos();
     let shots = platform::capture_monitors()?;
     if shots.is_empty() {
@@ -119,6 +129,7 @@ pub fn capture_all() -> Result<Capture, String> {
         shots,
         windows,
         cursor,
+        active,
         precaptured: None,
     })
 }
@@ -259,8 +270,9 @@ fn precapture(inner: &Arc<CacheInner>, grab: WindowGrabber) {
     crate::trace::mark(&format!("{rendered} covered windows rendered"));
 }
 
-/// The windows worth rendering in advance, the one under the pointer first,
-/// then top-most first. Only covered windows count - an uncovered one is
+/// The windows worth rendering in advance: the active window of an
+/// active-window snip or else the one under the pointer first, then top-most
+/// first. Only covered windows count - an uncovered one is
 /// taken from the screen as captured - and only those that show on a
 /// monitor somewhere, so that they can be picked at all.
 fn precapture_order(cap: &Capture) -> Vec<u64> {
@@ -282,13 +294,16 @@ fn precapture_order(cap: &Capture) -> Vec<u64> {
             .iter()
             .map(|s| s.w as i64 * s.h as i64)
             .sum::<i64>();
-    let under_cursor = cap
-        .cursor
-        .and_then(|(x, y)| cap.windows.iter().position(|w| w.rect.contains(x, y)));
+    let first = match cap.active {
+        Some(id) => cap.windows.iter().position(|w| w.id == id),
+        None => cap
+            .cursor
+            .and_then(|(x, y)| cap.windows.iter().position(|w| w.rect.contains(x, y))),
+    };
 
     let wins = &cap.windows;
     let mut order: Vec<usize> = (0..wins.len()).collect();
-    if let Some(i) = under_cursor {
+    if let Some(i) = first {
         order.retain(|j| *j != i);
         order.insert(0, i);
     }
@@ -402,6 +417,7 @@ mod tests {
             shots: vec![shot(RectI::new(0, 0, 1000, 800), 1000, 800)],
             windows,
             cursor,
+            active: None,
             precaptured: None,
         }
     }
@@ -421,6 +437,13 @@ mod tests {
             Some((5, 5)),
         );
         assert_eq!(precapture_order(&cap), vec![7, 2, 5]);
+
+        // Snipping the active window: that one comes first instead.
+        let cap = Capture {
+            active: Some(5),
+            ..cap
+        };
+        assert_eq!(precapture_order(&cap), vec![5, 2, 7]);
     }
 
     #[test]

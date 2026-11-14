@@ -473,8 +473,9 @@ impl App {
         self.capturing = true;
         let proxy = self.proxy.clone();
         let precapture = self.cfg.precapture_windows && req.kind == Kind::Snip;
+        let active = req.active;
         std::thread::spawn(move || {
-            let mut result = capture::capture_all();
+            let mut result = capture::capture_all(active);
             if precapture {
                 result = result.map(Capture::precapture);
             }
@@ -511,6 +512,7 @@ impl App {
         let Capture {
             shots,
             windows,
+            active,
             precaptured,
             ..
         } = cap;
@@ -575,6 +577,19 @@ impl App {
         }
         trace::mark("windows created");
 
+        // Snip the active window: select it on the monitor that shows most
+        // of it. Without one (the desktop has the focus), the window is picked
+        // by hand as usual.
+        if req.active {
+            let picked = active.and_then(|id| {
+                let rect = windows.iter().find(|w| w.id == id)?.rect;
+                let i = (0..wins.len()).max_by_key(|&i| wins[i].native.intersect(&rect).area())?;
+                wins[i].overlay.select_window_id(id).then_some(i)
+            });
+            if let Some(i) = picked {
+                focus = i;
+            }
+        }
         if mode == Mode::Fullscreen {
             wins[focus].overlay.select_all();
         }
@@ -714,6 +729,7 @@ impl App {
                     quick: None,
                     text: false,
                     scroll: false,
+                    active: false,
                 };
                 self.begin_delay(el, secs, req);
             }
@@ -2046,6 +2062,11 @@ impl ApplicationHandler<UserEvent> for App {
                     },
                     Some(Slot::Text) => Request {
                         text: true,
+                        ..Request::default()
+                    },
+                    Some(Slot::Active) => Request {
+                        mode: Some(Mode::Window),
+                        active: true,
                         ..Request::default()
                     },
                     Some(_) => Request::default(),

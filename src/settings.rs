@@ -862,7 +862,13 @@ mod tests {
         };
         Settings::new(
             cfg,
-            [Status::Active, Status::Taken, Status::Off, Status::Off],
+            [
+                Status::Active,
+                Status::Taken,
+                Status::Off,
+                Status::Off,
+                Status::Off,
+            ],
             false,
             false,
         )

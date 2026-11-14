@@ -22,6 +22,8 @@ pub struct Request {
     pub text: bool,
     /// Scroll the selected area and stitch it into one tall image.
     pub scroll: bool,
+    /// Start with the window that has the focus selected.
+    pub active: bool,
 }
 
 impl Default for Request {
@@ -33,6 +35,7 @@ impl Default for Request {
             quick: None,
             text: false,
             scroll: false,
+            active: false,
         }
     }
 }
@@ -57,7 +60,7 @@ impl Message {
             Message::Settings => "settings".into(),
             Message::Updated(path) => format!("updated {path}"),
             Message::Snip(r) => format!(
-                "snip mode={} kind={} delay={} quick={} text={} scroll={}",
+                "snip mode={} kind={} delay={} quick={} text={} scroll={} active={}",
                 r.mode.map(Mode::as_str).unwrap_or("default"),
                 if r.kind == Kind::Record {
                     "record"
@@ -72,6 +75,7 @@ impl Message {
                 },
                 if r.text { "yes" } else { "no" },
                 if r.scroll { "yes" } else { "no" },
+                if r.active { "yes" } else { "no" },
             ),
         }
     }
@@ -102,6 +106,7 @@ impl Message {
                         "delay" => r.delay = v.parse().ok()?,
                         "text" => r.text = v == "yes",
                         "scroll" => r.scroll = v == "yes",
+                        "active" => r.active = v == "yes",
                         "quick" => {
                             r.quick = match v {
                                 "yes" => Some(true),
@@ -200,6 +205,12 @@ mod tests {
                 quick: Some(true),
                 text: false,
                 scroll: false,
+                active: false,
+            }),
+            Message::Snip(Request {
+                mode: Some(Mode::Window),
+                active: true,
+                ..Request::default()
             }),
             Message::Snip(Request {
                 text: true,
@@ -216,6 +227,7 @@ mod tests {
                 quick: Some(false),
                 text: false,
                 scroll: false,
+                active: false,
             }),
         ];
         for m in cases {

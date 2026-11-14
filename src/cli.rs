@@ -68,6 +68,7 @@ MODES:
     freeform      draw any shape
 
 OPTIONS:
+    -a, --active               start with the active window selected
     -d, --delay <SECONDS>      wait before capturing (menus, hover states...)
     -r, --record               record the screen instead of taking a picture
     -t, --text                 copy the text in the selected area (OCR)
@@ -75,7 +76,8 @@ OPTIONS:
     -c, --copy                 copy as soon as the area is selected
     -e, --edit                 always open the markup tools after selecting
     -o, --output <FILE>        also save the result to FILE (png, jpg, bmp, gif)
-        --now                  capture the full screen right now, no overlay
+        --now                  capture the full screen (with --active: the active
+                               window) right now, no overlay
         --standalone           do not reuse the background instance
 
 BACKGROUND INSTANCE:
@@ -152,6 +154,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             "-r" | "--record" | "record" => req.kind = Kind::Record,
             "-t" | "--text" | "text" => req.text = true,
             "--scroll" | "scroll" => req.scroll = true,
+            "-a" | "--active" => req.active = true,
             "-c" | "--copy" => req.quick = Some(true),
             "-e" | "--edit" => req.quick = Some(false),
             "-o" | "--output" => out.output = Some(PathBuf::from(value(&mut it, "--output")?)),
@@ -172,7 +175,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             },
         }
     }
-    if out.now {
+    if req.active {
+        req.mode = Some(Mode::Window);
+    } else if out.now {
         req.mode = Some(Mode::Fullscreen);
     }
     if req.kind == Kind::Record && req.mode == Some(Mode::Freeform) {
@@ -220,6 +225,16 @@ mod tests {
     fn now_implies_fullscreen() {
         assert_eq!(snip("--now").mode, Some(Mode::Fullscreen));
         assert!(p("--now").unwrap().now);
+    }
+
+    #[test]
+    fn active_snips_a_window_with_or_without_the_overlay() {
+        let r = snip("--active");
+        assert!(r.active);
+        assert_eq!(r.mode, Some(Mode::Window));
+        let r = snip("--now -a");
+        assert!(r.active);
+        assert_eq!(r.mode, Some(Mode::Window));
     }
 
     #[test]

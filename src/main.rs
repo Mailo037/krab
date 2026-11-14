@@ -155,7 +155,7 @@ fn main() -> ExitCode {
 
 fn snip(args: &Args, req: Request) -> Result<(), String> {
     if args.now {
-        return capture_now(args);
+        return capture_now(args, req.active);
     }
     // If Krab already runs in the background, let it do the work: its
     // process is warm, so this path is the fastest of all.
@@ -174,7 +174,7 @@ fn snip(args: &Args, req: Request) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
         let req = req.clone();
         std::thread::spawn(move || {
-            let mut result = capture::capture_all();
+            let mut result = capture::capture_all(req.active);
             trace::mark("screen captured");
             // The main thread loads the config too; this copy only decides
             // whether to render the covered windows before the overlay is up.
@@ -322,22 +322,27 @@ fn restart_running_daemon(exe: &std::path::Path) -> bool {
     ipc::send(&Message::Updated(exe.display().to_string())).is_ok()
 }
 
-/// `krab --now`: full-screen capture without any UI.
-fn capture_now(args: &Args) -> Result<(), String> {
+/// `krab --now`: full-screen capture without any UI; with `--active`, the
+/// window that has the focus.
+fn capture_now(args: &Args, active: bool) -> Result<(), String> {
     let cfg = Config::load();
-    let cap = capture::capture_all()?;
-    let cursor = cap.cursor;
-    let shot = cap
-        .shots
-        .iter()
-        .find(|s| cursor.is_some_and(|(x, y)| s.native.contains(x, y)))
-        .or_else(|| cap.shots.iter().find(|s| s.primary))
-        .or(cap.shots.first())
-        .ok_or("no monitors found")?;
-    let img = Image {
-        w: shot.w,
-        h: shot.h,
-        rgba: krab::gfx::argb_to_rgba(&shot.px),
+    let cap = capture::capture_all(active)?;
+    let img = if active {
+        active_window_image(cap, &cfg)?
+    } else {
+        let cursor = cap.cursor;
+        let shot = cap
+            .shots
+            .iter()
+            .find(|s| cursor.is_some_and(|(x, y)| s.native.contains(x, y)))
+            .or_else(|| cap.shots.iter().find(|s| s.primary))
+            .or(cap.shots.first())
+            .ok_or("no monitors found")?;
+        Image {
+            w: shot.w,
+            h: shot.h,
+            rgba: krab::gfx::argb_to_rgba(&shot.px),
+        }
     };
     if cfg.copy_to_clipboard {
         output::copy_image(&img)?;
@@ -352,6 +357,42 @@ fn capture_now(args: &Args) -> Result<(), String> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// The active window as a window snip would take it - without the windows
+/// on top of it, with the configured border or background - through the
+/// overlay, which is never shown.
+fn active_window_image(cap: capture::Capture, cfg: &Config) -> Result<Image, String> {
+    use krab::overlay::{Kind, Mode, Options, Overlay, Shared};
+    let id = cap.active.ok_or("no active window found")?;
+    let rect = cap
+        .windows
+        .iter()
+        .find(|w| w.id == id)
+        .map(|w| w.rect)
+        .ok_or("no active window found")?;
+    let windows = cap.windows;
+    let shot = cap
+        .shots
+        .into_iter()
+        .max_by_key(|s| s.native.intersect(&rect).area())
+        .ok_or("no monitors found")?;
+    let shared = Shared {
+        mode: Mode::Window,
+        kind: Kind::Snip,
+        delay: cfg.delay_seconds,
+    };
+    let opts = Options {
+        quick_copy: false,
+        ..Options::from_config(cfg)
+    };
+    let mut overlay = Overlay::new(shot, &windows, opts, shared);
+    if !overlay.select_window_id(id) {
+        return Err("the active window is not on any screen".into());
+    }
+    overlay
+        .compose()
+        .ok_or_else(|| "could not render the window".into())
 }
 
 #[cfg(target_os = "linux")]

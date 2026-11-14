@@ -27,10 +27,10 @@ use windows_sys::Win32::UI::HiDpi::{
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, EnumWindows, GetClassNameW, GetCursorPos, GetMessagePos,
-    GetWindowLongW, GetWindowRect, GetWindowTextW, IsHungAppWindow, IsIconic, IsWindow,
-    IsWindowVisible, ASFW_ANY, GWL_EXSTYLE, PW_RENDERFULLCONTENT, WM_NCACTIVATE, WM_NCDESTROY,
-    WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    AllowSetForegroundWindow, EnumWindows, GetAncestor, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetMessagePos, GetWindowLongW, GetWindowRect, GetWindowTextW,
+    IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, ASFW_ANY, GA_ROOTOWNER, GWL_EXSTYLE,
+    PW_RENDERFULLCONTENT, WM_NCACTIVATE, WM_NCDESTROY, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, ICONINFO,
@@ -416,6 +416,23 @@ unsafe extern "system" fn window_cb(hwnd: HWND, data: LPARAM) -> BOOL {
         });
     }
     1
+}
+
+/// The window that has the focus, then the top-level window owning it (a
+/// dialog's main window, say), for when the first is not in the window list.
+pub fn foreground_windows() -> Vec<u64> {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() {
+            return Vec::new();
+        }
+        let mut ids = vec![fg as usize as u64];
+        let root = GetAncestor(fg, GA_ROOTOWNER);
+        if !root.is_null() && root != fg {
+            ids.push(root as usize as u64);
+        }
+        ids
+    }
 }
 
 /// Visible top-level windows, top-most first (EnumWindows walks the z-order).

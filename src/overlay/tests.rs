@@ -628,6 +628,20 @@ fn window_snip_shows_the_window_as_it_was_when_the_snip_started() {
 }
 
 #[test]
+fn the_active_window_can_be_selected_by_id() {
+    let mut o = stacked_windows(Mode::Window);
+    assert!(!o.select_window_id(42), "not on this monitor");
+    assert_eq!(o.selection(), None);
+    assert!(o.select_window_id(2));
+    assert_eq!(o.selection(), Some(RectI::new(60, 50, 300, 200)));
+    // Selected like a click: without the window lying on top of it.
+    assert_eq!(
+        pixel(&o.compose().unwrap(), 100, 60),
+        [0x12, 0x34, 0x56, 255]
+    );
+}
+
+#[test]
 fn window_snip_of_the_top_window_keeps_the_screen() {
     let mut o = stacked_windows(Mode::Window);
     click(&mut o, (150.0, 100.0));

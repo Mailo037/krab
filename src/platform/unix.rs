@@ -55,6 +55,17 @@ pub fn capture_monitors() -> Result<Vec<Shot>, String> {
     Ok(shots)
 }
 
+/// The window that has the focus, when the platform tells.
+pub fn foreground_windows() -> Vec<u64> {
+    Window::all()
+        .unwrap_or_default()
+        .iter()
+        .filter(|w| w.is_focused().unwrap_or(false))
+        .filter_map(|w| w.id().ok().map(u64::from))
+        .take(1)
+        .collect()
+}
+
 /// Visible top-level windows, top-most first. Empty when the platform does
 /// not expose them (e.g. most Wayland compositors).
 pub fn list_windows() -> Vec<WinInfo> {

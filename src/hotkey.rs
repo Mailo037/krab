@@ -12,23 +12,31 @@ use winit::keyboard::KeyCode;
 pub enum Slot {
     Snip,
     SnipAlt,
+    Active,
     Record,
     Text,
 }
 
 /// How many shortcuts Krab offers.
-pub const SLOTS: usize = 4;
+pub const SLOTS: usize = 5;
 
 /// The registration result of every slot, in [`Slot::ALL`] order.
 pub type Statuses = [Status; SLOTS];
 
 impl Slot {
-    pub const ALL: [Slot; SLOTS] = [Slot::Snip, Slot::SnipAlt, Slot::Record, Slot::Text];
+    pub const ALL: [Slot; SLOTS] = [
+        Slot::Snip,
+        Slot::SnipAlt,
+        Slot::Active,
+        Slot::Record,
+        Slot::Text,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Slot::Snip => "New snip",
             Slot::SnipAlt => "New snip (second shortcut)",
+            Slot::Active => "Snip the active window",
             Slot::Record => "Record screen",
             Slot::Text => "Copy text from screen",
         }
@@ -38,6 +46,7 @@ impl Slot {
         match self {
             Slot::Snip => &cfg.hotkey,
             Slot::SnipAlt => &cfg.hotkey_alt,
+            Slot::Active => &cfg.hotkey_active,
             Slot::Record => &cfg.hotkey_record,
             Slot::Text => &cfg.hotkey_text,
         }
@@ -47,6 +56,7 @@ impl Slot {
         match self {
             Slot::Snip => cfg.hotkey = spec,
             Slot::SnipAlt => cfg.hotkey_alt = spec,
+            Slot::Active => cfg.hotkey_active = spec,
             Slot::Record => cfg.hotkey_record = spec,
             Slot::Text => cfg.hotkey_text = spec,
         }
@@ -444,8 +454,9 @@ mod tests {
             ..Config::default()
         };
         let st = hk.apply(&cfg);
-        assert_eq!(st[0], Status::Unsupported);
-        assert_eq!(st[1], Status::Duplicate);
-        assert_eq!(st[2], Status::Invalid);
+        let of = |slot| &st[Slot::ALL.iter().position(|s| *s == slot).unwrap()];
+        assert_eq!(*of(Slot::Snip), Status::Unsupported);
+        assert_eq!(*of(Slot::SnipAlt), Status::Duplicate);
+        assert_eq!(*of(Slot::Record), Status::Invalid);
     }
 }

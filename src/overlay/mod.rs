@@ -564,6 +564,16 @@ impl Overlay {
         self.set_selection(self.bounds(), None);
     }
 
+    /// Select the window with this platform id, as if it had been clicked.
+    /// False when it does not show on this monitor.
+    pub fn select_window_id(&mut self, id: u64) -> bool {
+        let Some(win) = self.windows.iter().copied().find(|w| w.id == id) else {
+            return false;
+        };
+        self.select_window(win);
+        true
+    }
+
     fn set_selection(&mut self, rect: RectF, mask: Option<Mask>) {
         self.select(rect, mask, None);
     }

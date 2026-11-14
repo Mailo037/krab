@@ -67,6 +67,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Rectangle, freeform, window and full-screen snips | yes |
 | Window snips leave out windows lying on top of the app | yes (Windows, macOS) |
 | ...and show that app as it was when the snip started, not as it is once picked | yes - switch off in the settings |
+| Snip the active window with one shortcut | yes (`Alt+PrintScreen`, `krab --active`) |
 | Delayed snips (1 to 15 s from the timer button, or any value from the command line) | yes |
 | Pen, highlighter, eraser | yes |
 | Shapes: line, arrow, rectangle, ellipse | yes |
@@ -133,7 +134,8 @@ After the first snip Krab stays in the tray (the menu bar on macOS), so the shor
 opens instantly. Click the icon for a snip, or open its menu for everything else, including **Settings**.
 Turn on *Start when I log in* in the settings to have it there right away.
 
-**Windows** - the shortcuts are `PrintScreen` and `Alt+Shift+S` for a snip and `Alt+Shift+V` for a recording.
+**Windows** - the shortcuts are `PrintScreen` and `Alt+Shift+S` for a snip, `Alt+PrintScreen` for the active
+window and `Alt+Shift+V` for a recording.
 Windows 11 puts new tray icons into the overflow menu (the `^` arrow); drag Krab onto the taskbar to keep it in
 sight. If Windows opens its own Snipping Tool on `PrintScreen`, the settings window offers to turn that off.
 
@@ -186,6 +188,7 @@ MODES:
     freeform      draw any shape
 
 OPTIONS:
+    -a, --active               start with the active window selected
     -d, --delay <SECONDS>      wait before capturing (menus, hover states...)
     -r, --record               record the screen instead of taking a picture
     -c, --copy                 copy as soon as the area is selected
@@ -193,7 +196,8 @@ OPTIONS:
     -o, --output <FILE>        also save the result to FILE (png, jpg, bmp, gif)
     -t, --text                 copy the text in the selected area
         --scroll               scrolling capture of the selected area
-        --now                  capture the full screen right now, no overlay
+        --now                  capture the full screen (with --active: the active
+                               window) right now, no overlay
         --standalone           do not reuse the background instance
 
 BACKGROUND INSTANCE:
@@ -211,7 +215,9 @@ Examples:
 ```sh
 krab                      # drag an area, annotate, press Enter to copy
 krab window --copy        # click a window, it is on the clipboard immediately
+krab --active             # the window you are working in, ready to annotate
 krab full --now -o a.png  # scripted full-screen capture, no UI at all
+krab --active --now -o w.png  # the same for the active window
 krab --delay 5            # five seconds to open that menu first
 krab --record             # choose an area and record it
 krab --text               # select a paragraph, its text is on the clipboard
@@ -265,6 +271,7 @@ another one or clear it with the `x` button.
 ```toml
 hotkey = "PrintScreen"
 hotkey_alt = "Alt+Shift+S"
+hotkey_active = "Alt+PrintScreen" # snip the active window
 hotkey_record = "Alt+Shift+V"     # start / stop a screen recording
 hotkey_text = "Alt+Shift+T"       # copy the text in an area
 run_in_background = true       # stay in the tray after the first snip
@@ -280,6 +287,7 @@ border = false
 border_color = "#F46623"
 border_width = 2
 loupe = true                   # colour magnifier while selecting (tap Alt to toggle)
+precapture_windows = true      # covered windows as they were when the snip started
 delay_seconds = 3
 record_fps = 30
 record_audio = "off"           # off | system | mic | both (MP4, needs ffmpeg)

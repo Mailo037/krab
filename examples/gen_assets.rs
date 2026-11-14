@@ -679,6 +679,7 @@ fn scene_settings() -> (Vec<u32>, u32, u32) {
             Status::Taken,
             Status::Active,
             Status::Active,
+            Status::Active,
         ],
         true,
         false,

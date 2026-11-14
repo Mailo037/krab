@@ -11,6 +11,8 @@ pub struct Config {
     pub hotkey: String,
     /// Second global hotkey (used when the first one is taken by the system).
     pub hotkey_alt: String,
+    /// Global hotkey that snips the window that has the focus.
+    pub hotkey_active: String,
     /// Global hotkey that starts a screen recording.
     pub hotkey_record: String,
     /// Global hotkey that copies the text in a selected area.
@@ -74,6 +76,7 @@ impl Default for Config {
         Self {
             hotkey: default_hotkey().into(),
             hotkey_alt: default_hotkey_alt().into(),
+            hotkey_active: default_hotkey_active().into(),
             hotkey_record: default_hotkey_record().into(),
             hotkey_text: default_hotkey_text().into(),
             run_in_background: true,
@@ -119,6 +122,16 @@ fn default_hotkey_alt() -> &'static str {
         ""
     } else {
         "Alt+Shift+S"
+    }
+}
+
+/// Alt+Print Screen is where Windows and most Linux desktops put "snip the
+/// active window".
+fn default_hotkey_active() -> &'static str {
+    if cfg!(target_os = "macos") {
+        ""
+    } else {
+        "Alt+PrintScreen"
     }
 }
 
