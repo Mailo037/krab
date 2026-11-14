@@ -79,6 +79,8 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Background frame: padding, rounded corners and a shadow on a gradient | yes |
 | Colour picker with pixel loupe (copies HEX, RGB or HSL) | yes |
 | Crop after selecting (move and resize handles, arrow keys) | yes |
+| Markup stays editable: pick any arrow, shape, text or blur to move, resize, recolour, duplicate, reorder or delete it | yes |
+| Zoom into the screenshot while selecting and drawing | yes (`Ctrl` + wheel, up to 1600 %) |
 | Undo / redo | yes, for markup and for moving / resizing the selection |
 | Copy to clipboard | yes |
 | Save as PNG, JPEG, BMP or GIF | yes |
@@ -229,6 +231,8 @@ krab --text               # select a paragraph, its text is on the clipboard
 |---|---|
 | `R` `F` `W` `M` | rectangle, freeform, window, full screen (monitor) |
 | `Alt` (tap) | colour magnifier on / off (remembered) |
+| `Ctrl` + wheel, `Ctrl` `+` / `-`, `Z` / `Shift+Z` | zoom in / out at the pointer (`Ctrl+0`: actual size) |
+| wheel, `Shift` + wheel, middle drag (while zoomed) | scroll the zoomed view |
 | `Esc` | cancel |
 | right click | menu: snip this window, the whole screen, copy the colour under the pointer |
 | wheel or right click on the timer | choose the delay (1, 3, 5, 10 or 15 s) |
@@ -243,11 +247,14 @@ krab --text               # select a paragraph, its text is on the clipboard
 | `K` `N` `M` `G` | callout, step number, measure, blur |
 | `F` | background frame on / off |
 | `Ctrl+T` | pin to the screen |
-| arrow keys (`Shift` = 10 px, `Ctrl` = resize) | nudge the selection |
+| arrow keys (`Shift` = 10 px, `Ctrl` = resize) | nudge the selection, or the picked markup |
 | `Shift` while drawing | straight strokes, 45 degree lines, squares and circles |
-| mouse wheel | stroke size |
-| `Esc` | step back (a drag in progress, text, then selection, then close) |
-| right click | menu: copy, save, pin, copy text, hide personal data, copy colour (HEX, RGB, HSL), select the window under the pointer, undo |
+| click markup (`V` tool), or right click it with any tool | pick it: drag to move, handles to resize (`Shift` keeps the ratio), colour and size buttons restyle it |
+| `Del` / `Backspace`, `Ctrl+D` | delete / duplicate the picked markup |
+| mouse wheel | stroke size (scrolls instead while zoomed) |
+| `Ctrl` + wheel, `Ctrl` `+` / `-` / `0`, `Z` / `Shift+Z` | zoom in, out, actual size |
+| `Esc` | step back (a drag in progress, text, picked markup, then selection, then close) |
+| right click | menu: copy, save, pin, copy text, hide personal data, copy colour (HEX, RGB, HSL), select the window under the pointer, zoom, undo; on markup also delete, duplicate, recolour, bring to front, send to back |
 
 | Pinned snip | |
 |---|---|

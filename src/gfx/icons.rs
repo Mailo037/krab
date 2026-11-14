@@ -76,9 +76,16 @@ pub enum Icon {
     MouseWheel,
     /// A mouse; the filled part is its right button.
     MouseRight,
+    ZoomIn,
+    ZoomOut,
+    Trash,
+    /// Bring to front: the filled square lies on top.
+    ToFront,
+    /// Send to back: the filled square lies underneath.
+    ToBack,
 }
 
-const COUNT: usize = Icon::MouseRight as usize + 1;
+const COUNT: usize = Icon::ToBack as usize + 1;
 
 /// (stroked geometry, filled geometry)
 pub fn source(icon: Icon) -> (&'static str, &'static str) {
@@ -199,6 +206,23 @@ pub fn source(icon: Icon) -> (&'static str, &'static str) {
         Icon::MouseRight => (
             "R 6.5 3 11 18 5.5 M6.5 11 L17.5 11 M12 3 L12 11",
             "M12 3 L12 11 L17.5 11 L17.5 8.5 C17.5 5.5 15 3 12 3 Z",
+        ),
+        Icon::ZoomIn => (
+            "O 10.5 10.5 6.5 M15.4 15.4 L20 20 M7.8 10.5 L13.2 10.5 M10.5 7.8 L10.5 13.2",
+            "",
+        ),
+        Icon::ZoomOut => ("O 10.5 10.5 6.5 M15.4 15.4 L20 20 M7.8 10.5 L13.2 10.5", ""),
+        Icon::Trash => (
+            "M4.5 7 L19.5 7 P 1.4 9.5 7 9.5 4.5 14.5 4.5 14.5 7 P 2 6.5 7 7.5 20 16.5 20 17.5 7 M10 11 L10 16 M14 11 L14 16",
+            "",
+        ),
+        Icon::ToFront => (
+            "P 2.5 8 14.5 3.5 14.5 3.5 3.5 14.5 3.5 14.5 8",
+            "R 9.5 9.5 11 11 2.5",
+        ),
+        Icon::ToBack => (
+            "R 9.5 9.5 11 11 2.5",
+            "G 2 3.5 3.5 14.5 3.5 14.5 7.5 7.5 7.5 7.5 14.5 3.5 14.5",
         ),
     }
 }
@@ -392,6 +416,11 @@ pub const ALL: [Icon; COUNT] = [
     Icon::ChevronUp,
     Icon::MouseWheel,
     Icon::MouseRight,
+    Icon::ZoomIn,
+    Icon::ZoomOut,
+    Icon::Trash,
+    Icon::ToFront,
+    Icon::ToBack,
 ];
 
 /// Draw `icon` centered on `center`, fitted to a `size` x `size` box.

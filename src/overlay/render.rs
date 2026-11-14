@@ -145,13 +145,15 @@ impl Overlay {
         self.h = h;
         self.prev = None;
         self.layer = None;
+        self.zoom = 1.0;
+        self.view = Pt::new(0.0, 0.0);
         self.clear_selection();
     }
 
     /// Everything the frame depends on, computed once per frame.
     fn frame_info(&self) -> FrameInfo {
         let bars = self.bars();
-        let over_bar = bars.contains(self.cursor);
+        let over_bar = bars.contains(self.mouse);
         let full = RectI::new(0, 0, self.w as i32, self.h as i32);
         let idle = matches!(self.drag, Drag::None | Drag::Button(_));
         let dragging_rect = match self.drag {
@@ -421,6 +423,10 @@ impl Overlay {
         let f = self.frame_info();
         self.track_fades(&f);
         self.update_layer(&f);
+        if self.zoom > 1.0 {
+            self.render_zoomed(buf, w, h, &f);
+            return None;
+        }
 
         // Where the toolbars, loupe, labels and menu land this frame.
         let mut chrome = Vec::new();
@@ -485,8 +491,57 @@ impl Overlay {
         damage
     }
 
+    /// A zoomed-in frame: the visible part of the screenshot with its markup
+    /// is painted at its own size, magnified into `buf` pixel for pixel, and
+    /// the chrome is drawn on top at its normal size. Always a full repaint.
+    fn render_zoomed(&mut self, buf: &mut [u32], w: u32, h: u32, f: &FrameInfo) {
+        let z = self.zoom;
+        let vis = RectF::new(self.view.x, self.view.y, w as f32 / z, h as f32 / z)
+            .round_out()
+            .intersect(&f.full);
+        if vis.is_empty() {
+            return;
+        }
+        let (vw, vh) = (vis.w as usize, vis.h as usize);
+        let mut tmp = std::mem::take(&mut self.scratch);
+        tmp.clear();
+        tmp.resize(vw * vh, 0);
+        self.paint_base(&mut tmp, vw, vis, f);
+        if self.text_edit.is_some() {
+            let mut c = Canvas::new(&mut tmp, vw as u32, vh as u32)
+                .with_offset(-vis.x as f32, -vis.y as f32);
+            self.draw_text_edit(&mut c);
+        }
+        let column = |x: u32| {
+            let sx = (self.view.x + (x as f32 + 0.5) / z).floor() as i32 - vis.x;
+            sx.clamp(0, vis.w - 1) as usize
+        };
+        let cols: Vec<usize> = (0..w).map(column).collect();
+        let (w, h) = (w as usize, h as usize);
+        let mut last: Option<usize> = None;
+        for y in 0..h {
+            let sy = ((self.view.y + (y as f32 + 0.5) / z).floor() as i32 - vis.y)
+                .clamp(0, vis.h - 1) as usize;
+            let row = y * w;
+            if last == Some(sy) {
+                // The same screenshot row again: copy the row above.
+                buf.copy_within(row - w..row, row);
+            } else {
+                let src = &tmp[sy * vw..(sy + 1) * vw];
+                for (d, x) in buf[row..row + w].iter_mut().zip(&cols) {
+                    *d = src[*x];
+                }
+            }
+            last = Some(sy);
+        }
+        self.scratch = tmp;
+        self.draw_chrome(&mut Canvas::new(buf, w as u32, h as u32), f);
+        // The next frame at actual size must repaint everything.
+        self.prev = None;
+    }
+
     /// Selection outlines, toolbars, loupe, labels and menus: everything
-    /// drawn on top of the screenshot.
+    /// drawn on top of the screenshot, at its normal size even while zoomed.
     fn draw_chrome(&self, c: &mut Canvas, f: &FrameInfo) {
         let s = self.scale;
         let bars = &f.bars;
@@ -499,11 +554,11 @@ impl Overlay {
             .hover_target
             .filter(|_| sel_rect.is_none() && dragging_rect.is_none())
         {
-            let inset = r.to_f().inflate(-s);
+            let inset = self.rect_to_screen(r.to_f()).inflate(-s);
             c.stroke_rrect(inset, 0.0, 2.0 * s, theme::ACCENT);
         }
         if let Some(r) = sel_rect.or(dragging_rect).filter(|r| !r.is_empty()) {
-            let rf = r.to_f();
+            let rf = self.rect_to_screen(r.to_f());
             match mask {
                 Some(m) => self.draw_lasso(c, &m.poly, true),
                 None => {
@@ -511,18 +566,71 @@ impl Overlay {
                     c.stroke_rrect(rf.inflate(0.75 * s), 0.0, 1.5 * s, theme::ACCENT);
                 }
             }
-            if self.adjustable() && !matches!(self.drag, Drag::Move { .. }) {
+            if self.adjustable() && self.picked.is_none() && !matches!(self.drag, Drag::Move { .. })
+            {
                 for (_, hp) in Self::handle_points(rf) {
                     c.fill_circle(hp, 4.6 * s, theme::ACCENT);
                     c.fill_circle(hp, 3.0 * s, Color::WHITE);
                 }
             }
-            self.draw_size_label(c, rf, bars.above);
+            self.draw_size_label(c, rf, (r.w, r.h), bars.above);
         }
         if let Drag::Lasso { pts } = &self.drag {
             self.draw_lasso(c, pts, false);
         }
-        // --- text being typed -------------------------------------------------
+        self.draw_markup_chrome(c, idle);
+        // --- text being typed (part of the picture while zoomed) --------------
+        if self.zoom == 1.0 {
+            self.draw_text_edit(c);
+        }
+
+        self.draw_toolbars(c, f);
+    }
+
+    /// The picked object's frame and handles, and an outline on the object
+    /// the select tool would pick.
+    fn draw_markup_chrome(&self, c: &mut Canvas, idle: bool) {
+        if self.sel.is_none() || self.ui.kind != Kind::Snip {
+            return;
+        }
+        let s = self.scale;
+        let hovered = self
+            .hover_markup
+            .filter(|i| idle && Some(*i) != self.picked)
+            .and_then(|i| self.annotations.get(i));
+        if let Some(a) = hovered {
+            match a.ends() {
+                Some((p, q)) => c.line(
+                    self.to_screen(p),
+                    self.to_screen(q),
+                    1.5 * s,
+                    theme::ACCENT.alpha(0.8),
+                ),
+                None => {
+                    let r = self.rect_to_screen(a.frame()).inflate(3.0 * s);
+                    c.stroke_rrect(r, 3.0 * s, 1.5 * s, theme::ACCENT.alpha(0.8));
+                }
+            }
+        }
+        let Some(a) = self.picked_markup() else {
+            return;
+        };
+        if a.ends().is_none() {
+            let r = self.rect_to_screen(a.frame()).inflate(4.0 * s);
+            dashed_rect(c, r, 2.6 * s, s, Color::rgba(0, 0, 0, 90));
+            dashed_rect(c, r, 1.2 * s, s, theme::ACCENT);
+        }
+        for (_, q) in a.grips() {
+            let q = self.to_screen(q);
+            let r = RectF::new(q.x - 4.5 * s, q.y - 4.5 * s, 9.0 * s, 9.0 * s);
+            c.fill_rrect(r, 2.5 * s, Color::WHITE);
+            c.stroke_rrect(r, 2.5 * s, 1.5 * s, theme::ACCENT);
+        }
+    }
+
+    /// The text being typed, with its frame and caret.
+    fn draw_text_edit(&self, c: &mut Canvas) {
+        let s = self.scale;
         if let Some(edit) = &self.text_edit {
             let em = self.text_em();
             let (tw, th) = edit_size(edit, em);
@@ -591,7 +699,13 @@ impl Overlay {
                 caret,
             );
         }
+    }
 
+    /// Toolbars, tooltips, loupe, messages and menus.
+    fn draw_toolbars(&self, c: &mut Canvas, f: &FrameInfo) {
+        let s = self.scale;
+        let bars = &f.bars;
+        let idle = f.idle;
         // --- toolbars ---------------------------------------------------------
         // Each fades in as it appears; the palette also slides out of the
         // toolbar.
@@ -666,6 +780,9 @@ impl Overlay {
                 false,
             );
         }
+        if self.zoom > 1.0 {
+            self.draw_zoom_badge(c);
+        }
         if let Some((msg, since)) = &self.flash {
             let (a, dy) = self.flash_fade(*since);
             c.layer(a, 0.0, dy, |c| self.draw_pill(c, msg, 70.0 * s, true));
@@ -698,10 +815,57 @@ impl Overlay {
         )
     }
 
+    /// How far the view is zoomed in, in the top-left corner.
+    fn draw_zoom_badge(&self, c: &mut Canvas) {
+        let s = self.scale;
+        let em = theme::FONT * s;
+        let face = text::ui();
+        let label = format!("{:.0} %", self.zoom * 100.0);
+        let hint = if cfg!(target_os = "macos") {
+            "Cmd+0 for actual size"
+        } else {
+            "Ctrl+0 for actual size"
+        };
+        let (lw, hw) = (face.measure(&label, em), face.measure(hint, em));
+        let icon = 16.0 * s;
+        let pw = 10.0 * s + icon + 6.0 * s + lw + 14.0 * s + hw + 12.0 * s;
+        let r = RectF::new((12.0 * s).round(), (12.0 * s).round(), pw, 28.0 * s);
+        c.shadow(r, r.h / 2.0, 8.0 * s, 0.4);
+        c.fill_rrect(r, r.h / 2.0, theme::PANEL);
+        let cy = r.y + r.h / 2.0;
+        let mut x = r.x + 10.0 * s;
+        icons::draw(
+            c,
+            icons::Icon::ZoomIn,
+            Pt::new(x + icon / 2.0, cy),
+            icon,
+            theme::ICON,
+        );
+        x += icon + 6.0 * s;
+        x += face.draw(
+            c,
+            &label,
+            x,
+            face.baseline_for_center(cy, em),
+            em,
+            theme::TEXT,
+        );
+        c.fill_circle(Pt::new(x + 7.0 * s, cy), 1.6 * s, theme::TEXT_DIM);
+        face.draw(
+            c,
+            hint,
+            x + 14.0 * s,
+            face.baseline_for_center(cy, em),
+            em,
+            theme::TEXT_DIM,
+        );
+    }
+
     fn draw_lasso(&self, c: &mut Canvas, pts: &[Pt], closed: bool) {
         if pts.len() < 2 {
             return;
         }
+        let pts: Vec<Pt> = pts.iter().map(|p| self.to_screen(*p)).collect();
         let mut pb = PathBuilder::new();
         pb.move_to(pts[0].x, pts[0].y);
         for p in &pts[1..] {
@@ -716,9 +880,10 @@ impl Overlay {
         }
     }
 
-    fn draw_size_label(&self, c: &mut Canvas, sel: RectF, bar_above: bool) {
+    /// `sel` in window pixels, `size` the selection's size in screenshot pixels.
+    fn draw_size_label(&self, c: &mut Canvas, sel: RectF, size: (i32, i32), bar_above: bool) {
         let s = self.scale;
-        let label = format!("{} \u{00D7} {}", sel.w.round() as i32, sel.h.round() as i32);
+        let label = format!("{} \u{00D7} {}", size.0, size.1);
         let em = theme::FONT * s;
         let tw = text::ui().measure(&label, em);
         let (pw, ph) = (tw + 14.0 * s, 22.0 * s);
@@ -980,8 +1145,9 @@ impl Overlay {
     fn draw_loupe(&self, c: &mut Canvas) {
         const CELLS: i32 = 13;
         let s = self.scale;
-        let p = self.cursor;
-        let (px, py) = (p.x.floor() as i32, p.y.floor() as i32);
+        let (px, py) = (self.cursor.x.floor() as i32, self.cursor.y.floor() as i32);
+        // The loupe sits next to the pointer, wherever the view is zoomed to.
+        let p = self.mouse;
         let cell = (9.0 * s).round().max(4.0);
         let side = CELLS as f32 * cell;
         let pad = (5.0 * s).round();
@@ -1055,4 +1221,25 @@ impl Overlay {
             theme::TEXT_DIM,
         );
     }
+}
+
+/// A dashed outline of `r`, `width` thick, with dashes sized for `scale`.
+fn dashed_rect(c: &mut Canvas, r: RectF, width: f32, scale: f32, color: Color) {
+    let Some(p) = crate::gfx::rrect_path(r, 2.0 * scale) else {
+        return;
+    };
+    let stroke = Stroke {
+        width,
+        line_cap: LineCap::Butt,
+        line_join: LineJoin::Round,
+        dash: StrokeDash::new(vec![5.0 * scale, 3.0 * scale], 0.0),
+        ..Stroke::default()
+    };
+    c.stroke_path_ex(
+        &p,
+        &stroke,
+        color,
+        BlendMode::SourceOver,
+        Transform::identity(),
+    );
 }

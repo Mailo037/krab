@@ -10,7 +10,7 @@ mod layout;
 mod menu;
 mod render;
 
-use crate::annotate::{text_size, Annotation, Shape, Source, Tool};
+use crate::annotate::{text_size, Annotation, Grip, Shape, Source, Tool};
 use crate::capture::{Shot, WinInfo, WindowCache};
 use crate::config::Config;
 use crate::geom::{Pt, RectF, RectI};
@@ -111,6 +111,8 @@ pub struct Mods {
 pub enum Button {
     Left,
     Right,
+    /// Drags the view around while zoomed in.
+    Middle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -264,13 +266,44 @@ enum Handle {
 
 enum Drag {
     None,
-    NewRect { start: Pt },
-    Lasso { pts: Vec<Pt> },
-    Move { grab: Pt, orig: RectF },
-    Resize { handle: Handle, orig: RectF },
-    Draw { start: Pt },
-    Erase { checkpointed: bool },
+    NewRect {
+        start: Pt,
+    },
+    Lasso {
+        pts: Vec<Pt>,
+    },
+    Move {
+        grab: Pt,
+        orig: RectF,
+    },
+    Resize {
+        handle: Handle,
+        orig: RectF,
+    },
+    Draw {
+        start: Pt,
+    },
+    Erase {
+        checkpointed: bool,
+    },
     Button(Btn),
+    /// Moving the picked markup object; `before` is the undo step it makes.
+    MoveMarkup {
+        grab: Pt,
+        orig: Annotation,
+        before: Snapshot,
+    },
+    /// Dragging one of the picked object's handles.
+    ReshapeMarkup {
+        grip: Grip,
+        orig: Annotation,
+        before: Snapshot,
+    },
+    /// Dragging the zoomed-in view (`grab` in window pixels).
+    Pan {
+        grab: Pt,
+        view: Pt,
+    },
 }
 
 struct TextEdit {
@@ -303,6 +336,11 @@ pub struct Overlay {
     color: Color,
     width_idx: usize,
     annotations: Vec<Annotation>,
+    /// The markup object picked for editing: it shows handles, can be moved,
+    /// resized, recoloured and deleted.
+    picked: Option<usize>,
+    /// The object the select tool would pick under the pointer.
+    hover_markup: Option<usize>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     /// Arrow keys are moving the selection; a run of them is one undo step.
@@ -311,7 +349,14 @@ pub struct Overlay {
     text_edit: Option<TextEdit>,
 
     drag: Drag,
+    /// The pointer in screenshot pixels.
     cursor: Pt,
+    /// The pointer in window pixels (differs from `cursor` while zoomed).
+    mouse: Pt,
+    /// Magnification of the screenshot; 1 shows it as it is.
+    zoom: f32,
+    /// The screenshot pixel shown at the window's top-left corner.
+    view: Pt,
     cursor_inside: bool,
     mods: Mods,
     /// The palette of markup tools is open.
@@ -350,6 +395,12 @@ pub struct Overlay {
     clock: Option<Instant>,
 }
 
+/// How far the view can be zoomed in.
+const MAX_ZOOM: f32 = 16.0;
+/// Zoom per notch of the mouse wheel.
+const WHEEL_ZOOM: f32 = 1.2;
+/// Zoom per key press or menu entry.
+const KEY_ZOOM: f32 = 1.5;
 const FLASH_TIME: Duration = Duration::from_millis(1500);
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -399,6 +450,8 @@ impl Overlay {
             color,
             width_idx: 1,
             annotations: Vec::new(),
+            picked: None,
+            hover_markup: None,
             undo: Vec::new(),
             redo: Vec::new(),
             nudging: false,
@@ -406,6 +459,9 @@ impl Overlay {
             text_edit: None,
             drag: Drag::None,
             cursor: Pt::new(-1.0, -1.0),
+            mouse: Pt::new(-1.0, -1.0),
+            zoom: 1.0,
+            view: Pt::new(0.0, 0.0),
             cursor_inside: false,
             mods: Mods::default(),
             palette: false,
@@ -457,7 +513,7 @@ impl Overlay {
     }
 
     pub fn has_selection(&self) -> bool {
-        self.sel.is_some() || !matches!(self.drag, Drag::None | Drag::Button(_))
+        self.sel.is_some() || !matches!(self.drag, Drag::None | Drag::Button(_) | Drag::Pan { .. })
     }
 
     /// True once after this overlay began (or received) a selection, so the
@@ -547,6 +603,8 @@ impl Overlay {
         self.restore_patch();
         self.sel = None;
         self.annotations.clear();
+        self.picked = None;
+        self.hover_markup = None;
         self.ann_version += 1;
         self.undo.clear();
         self.redo.clear();
@@ -591,6 +649,8 @@ impl Overlay {
             self.isolate(win);
         }
         self.annotations.clear();
+        self.picked = None;
+        self.hover_markup = None;
         self.ann_version += 1;
         self.undo.clear();
         self.redo.clear();
@@ -670,13 +730,16 @@ impl Overlay {
         }
     }
 
-    fn handle_at(&self, p: Pt) -> Option<Handle> {
+    /// The handle of the selection under the pointer.
+    fn handle_at(&self) -> Option<Handle> {
         let sel = self.sel.as_ref()?;
-        if !self.adjustable() {
+        // A picked markup object shows its own handles instead.
+        if !self.adjustable() || self.picked.is_some() {
             return None;
         }
+        let p = self.mouse;
         let reach = 9.0 * self.scale;
-        let r = sel.rect;
+        let r = self.rect_to_screen(sel.rect);
         if let Some((h, _)) = Self::handle_points(r)
             .into_iter()
             .find(|(_, hp)| hp.dist(p) <= reach)
@@ -819,6 +882,8 @@ impl Overlay {
 
     fn restore(&mut self, snap: Snapshot) {
         self.annotations = snap.annotations;
+        self.picked = None;
+        self.hover_markup = None;
         self.ann_version += 1;
         if let (Some(rect), Some(sel)) = (snap.rect, &mut self.sel) {
             sel.rect = rect;
@@ -892,6 +957,7 @@ impl Overlay {
                     color: self.color,
                     width: self.stroke_width(),
                 });
+                self.picked = Some(self.annotations.len() - 1);
             }
             self.dirty = true;
         }
@@ -1026,13 +1092,15 @@ impl Overlay {
     }
 
     pub fn pointer_moved(&mut self, x: f32, y: f32) {
-        let p = Pt::new(x, y);
+        let m = Pt::new(x, y);
+        self.mouse = m;
+        let p = self.to_image(m);
         self.cursor = p;
         self.cursor_inside = true;
         self.dirty = true;
 
         if self.menu.is_some() {
-            let hover = self.menu_hit(p);
+            let hover = self.menu_hit(m);
             if let Some(m) = &mut self.menu {
                 m.hover = hover;
             }
@@ -1044,7 +1112,19 @@ impl Overlay {
         match self.drag {
             Drag::None => {}
             Drag::Button(_) => {
-                self.hover_btn = self.bars().hit(p);
+                self.hover_btn = self.bars().hit(m);
+                return;
+            }
+            Drag::Pan { grab, view } => {
+                self.view = Pt::new(
+                    view.x - (m.x - grab.x) / self.zoom,
+                    view.y - (m.y - grab.y) / self.zoom,
+                );
+                self.view_changed();
+                return;
+            }
+            Drag::MoveMarkup { .. } | Drag::ReshapeMarkup { .. } => {
+                self.drag_markup(p);
                 return;
             }
             Drag::NewRect { .. } => return,
@@ -1082,10 +1162,14 @@ impl Overlay {
         }
 
         let bars = self.bars();
-        self.hover_btn = bars.hit(p);
+        self.hover_btn = bars.hit(m);
         self.hover_window = None;
-        if self.sel.is_none() && self.ui.mode == Mode::Window && !bars.contains(p) {
+        if self.sel.is_none() && self.ui.mode == Mode::Window && !bars.contains(m) {
             self.hover_window = self.window_at(p).map(|w| w.rect);
+        }
+        self.hover_markup = None;
+        if self.tool == Tool::Select && !self.palette && !bars.contains(m) {
+            self.hover_markup = self.markup_at(p);
         }
     }
 
@@ -1094,22 +1178,35 @@ impl Overlay {
         if self.menu.is_some() {
             match (button, pressed) {
                 (Button::Left, true) => {
-                    if !self.menu_contains(self.cursor) {
+                    if !self.menu_contains(self.mouse) {
                         self.menu = None;
                         self.swallow_release = true;
                     }
                 }
                 (Button::Left, false) => {
-                    if let Some(i) = self.menu_hit(self.cursor) {
+                    if let Some(i) = self.menu_hit(self.mouse) {
                         self.run_menu(i);
                     }
                 }
                 (Button::Right, true) => self.context_click(),
-                (Button::Right, false) => {}
+                (Button::Right, false) | (Button::Middle, _) => {}
             }
             return;
         }
         match (button, pressed) {
+            (Button::Middle, true) => {
+                if self.zoom > 1.0 && matches!(self.drag, Drag::None) {
+                    self.drag = Drag::Pan {
+                        grab: self.mouse,
+                        view: self.view,
+                    };
+                }
+            }
+            (Button::Middle, false) => {
+                if matches!(self.drag, Drag::Pan { .. }) {
+                    self.drag = Drag::None;
+                }
+            }
             (Button::Left, true) => self.press(),
             (Button::Left, false) => {
                 if !std::mem::take(&mut self.swallow_release) {
@@ -1126,15 +1223,17 @@ impl Overlay {
     fn press(&mut self) {
         let p = self.cursor;
         let bars = self.bars();
-        if let Some(btn) = bars.hit(p) {
+        if let Some(btn) = bars.hit(self.mouse) {
             if self.btn_enabled(btn) {
                 self.drag = Drag::Button(btn);
             }
             return;
         }
-        if bars.contains(p) {
+        if bars.contains(self.mouse) {
             return;
         }
+        // A run of arrow keys ends here.
+        self.nudging = false;
         if std::mem::take(&mut self.palette) {
             // A click next to the open palette only closes it.
             self.swallow_release = true;
@@ -1168,9 +1267,10 @@ impl Overlay {
 
     fn is_double_click(&mut self, p: Pt) -> bool {
         let now = Instant::now();
-        let hit = self.last_click.is_some_and(|(t, lp)| {
-            now.duration_since(t) <= DOUBLE_CLICK && lp.dist(p) <= 5.0 * self.scale
-        });
+        let reach = self.ui_px(5.0);
+        let hit = self
+            .last_click
+            .is_some_and(|(t, lp)| now.duration_since(t) <= DOUBLE_CLICK && lp.dist(p) <= reach);
         self.last_click = if hit { None } else { Some((now, p)) };
         hit
     }
@@ -1181,8 +1281,12 @@ impl Overlay {
         };
         let inside = sel.contains(p);
 
+        if self.ui.kind == Kind::Snip && self.press_markup(p, inside) {
+            return;
+        }
+
         if self.adjustable() {
-            if let Some(handle) = self.handle_at(p) {
+            if let Some(handle) = self.handle_at() {
                 self.drag = Drag::Resize { handle, orig: sel };
                 return;
             }
@@ -1256,6 +1360,7 @@ impl Overlay {
                     color: self.color,
                     width: self.stroke_width(),
                 });
+                self.picked = Some(self.annotations.len() - 1);
             }
             Tool::Text => {
                 let m = crate::gfx::text::ui().metrics(self.text_em());
@@ -1279,13 +1384,19 @@ impl Overlay {
     fn release(&mut self) {
         let p = self.cursor;
         match std::mem::replace(&mut self.drag, Drag::None) {
-            Drag::None | Drag::Erase { .. } => {}
+            Drag::None | Drag::Erase { .. } | Drag::Pan { .. } => {}
             Drag::Move { orig, .. } | Drag::Resize { orig, .. } => self.record_adjustment(orig),
+            Drag::MoveMarkup { orig, before, .. } | Drag::ReshapeMarkup { orig, before, .. } => {
+                if self.picked.and_then(|i| self.annotations.get(i)) != Some(&orig) {
+                    self.push_undo(before);
+                }
+            }
             Drag::Button(btn) => {
-                if self.bars().hit(p) == Some(btn) {
+                let m = self.mouse;
+                if self.bars().hit(m) == Some(btn) {
                     self.activate(btn);
                 }
-                self.hover_btn = self.bars().hit(p);
+                self.hover_btn = self.bars().hit(m);
             }
             Drag::NewRect { start } => {
                 let rect = RectF::from_points(start, p).intersect(&self.bounds());
@@ -1305,8 +1416,8 @@ impl Overlay {
                 if self.tool == Tool::Callout {
                     self.draft = None;
                     // A plain click puts the bubble up and to the right.
-                    let pos = if start.dist(p) < 8.0 * self.scale {
-                        Pt::new(start.x + 28.0 * self.scale, start.y - 56.0 * self.scale)
+                    let pos = if start.dist(p) < self.ui_px(8.0) {
+                        Pt::new(start.x + self.ui_px(28.0), start.y - self.ui_px(56.0))
                     } else {
                         p
                     };
@@ -1331,7 +1442,14 @@ impl Overlay {
                     };
                     if keep {
                         self.checkpoint();
+                        // Shapes stay picked so they can be adjusted at once;
+                        // freehand ink does not, so the next stroke can start
+                        // right on top of it.
+                        let pick = !matches!(d.shape, Shape::Stroke { .. });
                         self.annotations.push(d);
+                        if pick {
+                            self.picked = Some(self.annotations.len() - 1);
+                        }
                     }
                 }
             }
@@ -1441,7 +1559,7 @@ impl Overlay {
     }
 
     fn erase_at(&mut self, p: Pt) {
-        let tol = 6.0 * self.scale;
+        let tol = self.ui_px(6.0);
         if let Some(i) = self.annotations.iter().rposition(|a| a.hit(p, tol)) {
             if let Drag::Erase { checkpointed } = &mut self.drag {
                 if !*checkpointed {
@@ -1450,6 +1568,8 @@ impl Overlay {
                 }
             }
             self.annotations.remove(i);
+            self.picked = None;
+            self.hover_markup = None;
             self.ann_version += 1;
         }
     }
@@ -1474,6 +1594,23 @@ impl Overlay {
 
     pub fn scroll(&mut self, dy: f32) {
         if dy == 0.0 {
+            return;
+        }
+        if self.mods.ctrl {
+            // Ctrl + wheel zooms in and out around the pointer.
+            let at = self.mouse;
+            self.zoom_by(WHEEL_ZOOM.powf(dy.clamp(-3.0, 3.0)), at);
+            return;
+        }
+        if self.hover_btn.is_none() && self.zoom > 1.0 {
+            // Zoomed in, the wheel scrolls the view (Shift: sideways).
+            let step = 90.0 * self.scale / self.zoom * dy;
+            if self.mods.shift {
+                self.view.x -= step;
+            } else {
+                self.view.y -= step;
+            }
+            self.view_changed();
             return;
         }
         if self.hover_btn == Some(Btn::Delay) {
@@ -1502,18 +1639,28 @@ impl Overlay {
     /// Esc: undo one level of state, closing at the outermost.
     fn step_back(&mut self) {
         if !matches!(self.drag, Drag::None) {
-            // Cancel the drag: a moved or resized selection goes back.
-            if let Drag::Move { orig, .. } | Drag::Resize { orig, .. } = self.drag {
-                if let Some(sel) = &mut self.sel {
-                    sel.rect = orig;
+            // Cancel the drag: a moved or resized selection or object goes back.
+            match std::mem::replace(&mut self.drag, Drag::None) {
+                Drag::Move { orig, .. } | Drag::Resize { orig, .. } => {
+                    if let Some(sel) = &mut self.sel {
+                        sel.rect = orig;
+                    }
                 }
+                Drag::MoveMarkup { orig, .. } | Drag::ReshapeMarkup { orig, .. } => {
+                    if let Some(a) = self.picked.and_then(|i| self.annotations.get_mut(i)) {
+                        *a = orig;
+                        self.ann_version += 1;
+                    }
+                }
+                _ => {}
             }
-            self.drag = Drag::None;
             self.draft = None;
         } else if self.text_edit.is_some() {
             self.commit_text();
         } else if self.palette {
             self.palette = false;
+        } else if self.picked.is_some() {
+            self.picked = None;
         } else if self.sel.is_some() {
             self.clear_selection();
         } else {
@@ -1593,8 +1740,11 @@ impl Overlay {
             Key::Enter => self.confirm(),
             Key::Char(c) if self.mods.ctrl => self.ctrl_shortcut(c),
             Key::Char(c) => self.plain_shortcut(c.to_ascii_lowercase()),
+            Key::Left | Key::Right | Key::Up | Key::Down if self.picked.is_some() => {
+                self.nudge_markup(key)
+            }
             Key::Left | Key::Right | Key::Up | Key::Down => self.nudge(key),
-            Key::Backspace | Key::Delete => {}
+            Key::Backspace | Key::Delete => self.delete_markup(),
         }
     }
 
@@ -1606,6 +1756,10 @@ impl Overlay {
             'z' if self.mods.shift => self.redo(),
             'z' => self.undo(),
             'y' => self.redo(),
+            'd' => self.duplicate_markup(),
+            '+' | '=' => self.zoom_step(true),
+            '-' => self.zoom_step(false),
+            '0' => self.reset_zoom(),
             'a' => {
                 self.clear_selection();
                 self.select_all();
@@ -1615,6 +1769,11 @@ impl Overlay {
     }
 
     fn plain_shortcut(&mut self, c: char) {
+        // Z zooms in where the pointer is, Shift+Z zooms back out.
+        if c == 'z' {
+            self.zoom_step(!self.mods.shift);
+            return;
+        }
         if self.sel.is_none() {
             let mode = match c {
                 'r' => Mode::Rect,
@@ -1651,8 +1810,18 @@ impl Overlay {
             }
             _ => return,
         };
+        self.set_tool(tool);
+    }
+
+    fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.palette = false;
+        if matches!(tool, Tool::Eraser | Tool::Pipette) {
+            self.picked = None;
+        }
+        if tool != Tool::Select {
+            self.hover_markup = None;
+        }
     }
 
     fn nudge(&mut self, key: Key) {
@@ -1697,6 +1866,327 @@ impl Overlay {
         if let Some(sel) = &mut self.sel {
             sel.rect = moved;
         }
+    }
+
+    // ---- zoom --------------------------------------------------------------
+
+    /// Window pixels to screenshot pixels.
+    fn to_image(&self, p: Pt) -> Pt {
+        Pt::new(self.view.x + p.x / self.zoom, self.view.y + p.y / self.zoom)
+    }
+
+    /// Screenshot pixels to window pixels.
+    pub(super) fn to_screen(&self, p: Pt) -> Pt {
+        Pt::new(
+            (p.x - self.view.x) * self.zoom,
+            (p.y - self.view.y) * self.zoom,
+        )
+    }
+
+    pub(super) fn rect_to_screen(&self, r: RectF) -> RectF {
+        let o = self.to_screen(Pt::new(r.x, r.y));
+        RectF::new(o.x, o.y, r.w * self.zoom, r.h * self.zoom)
+    }
+
+    /// `v` UI pixels measured in screenshot pixels.
+    fn ui_px(&self, v: f32) -> f32 {
+        v * self.scale / self.zoom
+    }
+
+    /// How far the screenshot is magnified (1 when it is not).
+    pub fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    /// Magnify by `factor`, keeping the screenshot pixel under `at`
+    /// (window pixels) where it is.
+    pub fn zoom_by(&mut self, factor: f32, at: Pt) {
+        let old = self.zoom;
+        let mut z = (old * factor).clamp(1.0, MAX_ZOOM);
+        if z < 1.02 {
+            z = 1.0;
+        }
+        if z == old {
+            return;
+        }
+        let fixed = self.to_image(at);
+        self.zoom = z;
+        self.view = Pt::new(fixed.x - at.x / z, fixed.y - at.y / z);
+        self.view_changed();
+    }
+
+    /// One step in or out, around the pointer (or the middle of the screen).
+    fn zoom_step(&mut self, zoom_in: bool) {
+        let at = if self.cursor_inside {
+            self.mouse
+        } else {
+            Pt::new(self.w as f32 / 2.0, self.h as f32 / 2.0)
+        };
+        self.zoom_by(if zoom_in { KEY_ZOOM } else { 1.0 / KEY_ZOOM }, at);
+    }
+
+    /// Back to the screenshot at its actual size.
+    pub fn reset_zoom(&mut self) {
+        if self.zoom != 1.0 {
+            self.zoom = 1.0;
+            self.view_changed();
+        }
+    }
+
+    /// Keep the view on the screenshot after it moved or changed its zoom.
+    fn view_changed(&mut self) {
+        if self.zoom <= 1.0 {
+            self.zoom = 1.0;
+            self.view = Pt::new(0.0, 0.0);
+        } else {
+            let (vw, vh) = (self.w as f32 / self.zoom, self.h as f32 / self.zoom);
+            self.view = Pt::new(
+                self.view.x.clamp(0.0, (self.w as f32 - vw).max(0.0)),
+                self.view.y.clamp(0.0, (self.h as f32 - vh).max(0.0)),
+            );
+        }
+        self.cursor = self.to_image(self.mouse);
+        self.prev = None;
+        self.dirty = true;
+    }
+
+    // ---- picked markup -----------------------------------------------------
+
+    /// The topmost markup object under `p` (screenshot pixels).
+    fn markup_at(&self, p: Pt) -> Option<usize> {
+        if self.ui.kind != Kind::Snip || !self.sel.as_ref().is_some_and(|s| s.rect.contains(p)) {
+            return None;
+        }
+        let tol = self.ui_px(5.0);
+        self.annotations.iter().rposition(|a| a.hit(p, tol))
+    }
+
+    fn picked_markup(&self) -> Option<&Annotation> {
+        self.picked.and_then(|i| self.annotations.get(i))
+    }
+
+    /// The handle of the picked object under the pointer.
+    fn grip_at(&self, a: &Annotation) -> Option<Grip> {
+        let reach = 7.0 * self.scale;
+        a.grips()
+            .into_iter()
+            .map(|(g, q)| (g, self.to_screen(q).dist(self.mouse)))
+            .filter(|(_, d)| *d <= reach)
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+            .map(|(g, _)| g)
+    }
+
+    /// Whether a press at `p` grabs the picked object itself. The select
+    /// tool grabs it anywhere in its box, the other tools only on its ink,
+    /// so they can still start drawing inside a picked rectangle.
+    fn on_picked_body(&self, a: &Annotation, p: Pt, inside: bool) -> bool {
+        let tol = self.ui_px(5.0);
+        inside
+            && (a.hit(p, tol)
+                || (self.tool == Tool::Select
+                    && a.ends().is_none()
+                    && a.frame().inflate(tol).contains(p)))
+    }
+
+    /// The tools that act on markup rather than draw it.
+    fn edits_markup(&self) -> bool {
+        !matches!(self.tool, Tool::Eraser | Tool::Pipette)
+    }
+
+    /// A press that picks, moves or reshapes markup. False when it did
+    /// none of these (and the press does what it did before).
+    fn press_markup(&mut self, p: Pt, inside: bool) -> bool {
+        if !self.edits_markup() {
+            return false;
+        }
+        if let Some(a) = self.picked_markup().cloned() {
+            if let Some(grip) = self.grip_at(&a) {
+                self.drag = Drag::ReshapeMarkup {
+                    grip,
+                    orig: a,
+                    before: self.snapshot(),
+                };
+                return true;
+            }
+            if self.on_picked_body(&a, p, inside) {
+                self.drag = Drag::MoveMarkup {
+                    grab: p,
+                    orig: a,
+                    before: self.snapshot(),
+                };
+                return true;
+            }
+        }
+        if self.tool == Tool::Select {
+            if let Some(i) = self.markup_at(p) {
+                self.picked = Some(i);
+                self.drag = Drag::MoveMarkup {
+                    grab: p,
+                    orig: self.annotations[i].clone(),
+                    before: self.snapshot(),
+                };
+                return true;
+            }
+        }
+        self.picked = None;
+        false
+    }
+
+    /// Follow the pointer while moving or reshaping the picked object.
+    fn drag_markup(&mut self, p: Pt) {
+        let Some(i) = self.picked else {
+            return;
+        };
+        let shift = self.mods.shift;
+        let new = match &self.drag {
+            Drag::MoveMarkup { grab, orig, .. } => {
+                let (mut dx, mut dy) = (p.x - grab.x, p.y - grab.y);
+                // Shift keeps the move straight.
+                if shift {
+                    if dx.abs() >= dy.abs() {
+                        dy = 0.0;
+                    } else {
+                        dx = 0.0;
+                    }
+                }
+                let mut a = orig.clone();
+                a.translate(dx.round(), dy.round());
+                a
+            }
+            Drag::ReshapeMarkup { grip, orig, .. } => {
+                // Shift snaps a line to 45 degree steps, a box to its ratio.
+                let q = match (grip, orig.ends()) {
+                    (Grip::A, Some((_, b))) if shift => snap_angle(b, p),
+                    (Grip::B, Some((a, _))) if shift => snap_angle(a, p),
+                    _ => p,
+                };
+                orig.with_grip(*grip, q, shift)
+            }
+            _ => return,
+        };
+        if let Some(slot) = self.annotations.get_mut(i) {
+            if *slot != new {
+                *slot = new;
+                self.ann_version += 1;
+            }
+        }
+    }
+
+    /// The pointer over markup: what a press there would do.
+    fn markup_cursor(&self, inside: bool) -> Option<CursorKind> {
+        if self.ui.kind != Kind::Snip || !self.edits_markup() {
+            return None;
+        }
+        if let Some(a) = self.picked_markup() {
+            if let Some(g) = self.grip_at(a) {
+                return Some(grip_cursor(g));
+            }
+            if self.on_picked_body(a, self.cursor, inside) {
+                return Some(CursorKind::Move);
+            }
+        }
+        (self.tool == Tool::Select && self.hover_markup.is_some()).then_some(CursorKind::Move)
+    }
+
+    /// Change the picked object, as one undo step.
+    fn edit_markup(&mut self, edit: impl FnOnce(&mut Vec<Annotation>, usize) -> Option<usize>) {
+        let Some(i) = self.picked.filter(|i| *i < self.annotations.len()) else {
+            return;
+        };
+        let before = self.snapshot();
+        let mut list = self.annotations.clone();
+        let picked = edit(&mut list, i);
+        if list != self.annotations {
+            self.push_undo(before);
+            self.annotations = list;
+            self.ann_version += 1;
+        }
+        self.picked = picked;
+        self.hover_markup = None;
+        self.dirty = true;
+    }
+
+    /// Del: remove the picked object.
+    pub fn delete_markup(&mut self) {
+        self.edit_markup(|list, i| {
+            list.remove(i);
+            None
+        });
+    }
+
+    /// Ctrl+D: a copy of the picked object, a little offset, picked instead.
+    fn duplicate_markup(&mut self) {
+        let off = (12.0 * self.scale).round();
+        self.edit_markup(|list, i| {
+            let mut copy = list[i].clone();
+            copy.translate(off, off);
+            list.push(copy);
+            Some(list.len() - 1)
+        });
+    }
+
+    fn markup_to_front(&mut self) {
+        self.edit_markup(|list, i| {
+            let a = list.remove(i);
+            list.push(a);
+            Some(list.len() - 1)
+        });
+    }
+
+    fn markup_to_back(&mut self) {
+        self.edit_markup(|list, i| {
+            let a = list.remove(i);
+            list.insert(0, a);
+            Some(0)
+        });
+    }
+
+    /// Give the picked object the current colour, or the current size.
+    fn restyle_markup(&mut self, color: bool) {
+        if !self.picked_markup().is_some_and(|a| a.has_style()) {
+            return;
+        }
+        let (c, sw, em, r) = (
+            self.color,
+            self.stroke_width(),
+            self.text_em(),
+            self.step_radius(),
+        );
+        let scale = self.scale;
+        self.edit_markup(|list, i| {
+            let a = &mut list[i];
+            if color {
+                a.color = c;
+            } else {
+                match &mut a.shape {
+                    Shape::Text { size, .. } | Shape::Callout { size, .. } => *size = em,
+                    Shape::Step { r: radius, .. } => *radius = r,
+                    Shape::Measure { .. } => a.width = (sw * 0.5).max(1.5 * scale),
+                    _ => a.width = sw,
+                }
+            }
+            Some(i)
+        });
+    }
+
+    /// Arrow keys move the picked object; a run of them is one undo step.
+    fn nudge_markup(&mut self, key: Key) {
+        let Some(i) = self.picked.filter(|i| *i < self.annotations.len()) else {
+            return;
+        };
+        let step = if self.mods.shift { 10.0 } else { 1.0 };
+        let (dx, dy) = match key {
+            Key::Left => (-step, 0.0),
+            Key::Right => (step, 0.0),
+            Key::Up => (0.0, -step),
+            _ => (0.0, step),
+        };
+        if !self.nudging {
+            self.checkpoint();
+            self.nudging = true;
+        }
+        self.annotations[i].translate(dx, dy);
+        self.ann_version += 1;
     }
 
     // ---- buttons -----------------------------------------------------------
@@ -1750,8 +2240,7 @@ impl Overlay {
             Btn::Cancel => self.outcome = Some(Outcome::Cancel),
             Btn::Tool(t) => {
                 self.commit_text();
-                self.tool = t;
-                self.palette = false;
+                self.set_tool(t);
             }
             Btn::Undo => self.undo(),
             Btn::Redo => self.redo(),
@@ -1789,8 +2278,14 @@ impl Overlay {
                 }
             }
             Btn::Copy => self.finish(Finish::Copy),
-            Btn::Color(i) => self.color = theme::PALETTE[i as usize],
-            Btn::Width(i) => self.width_idx = (i as usize).min(theme::WIDTHS.len() - 1),
+            Btn::Color(i) => {
+                self.color = theme::PALETTE[i as usize];
+                self.restyle_markup(true);
+            }
+            Btn::Width(i) => {
+                self.width_idx = (i as usize).min(theme::WIDTHS.len() - 1);
+                self.restyle_markup(false);
+            }
             Btn::Record => self.confirm(),
         }
     }
@@ -1803,17 +2298,19 @@ impl Overlay {
                 CursorKind::Default
             };
         }
-        if let Drag::Move { .. } = self.drag {
-            return CursorKind::Move;
-        }
-        if let Drag::Resize { handle, .. } = self.drag {
-            return handle_cursor(handle);
+        match &self.drag {
+            Drag::Move { .. } | Drag::MoveMarkup { .. } | Drag::Pan { .. } => {
+                return CursorKind::Move
+            }
+            Drag::Resize { handle, .. } => return handle_cursor(*handle),
+            Drag::ReshapeMarkup { grip, .. } => return grip_cursor(*grip),
+            _ => {}
         }
         if matches!(self.drag, Drag::None | Drag::Button(_)) {
             if self.hover_btn.is_some() {
                 return CursorKind::Pointer;
             }
-            if self.bars().contains(self.cursor) {
+            if self.bars().contains(self.mouse) {
                 return CursorKind::Default;
             }
         }
@@ -1823,10 +2320,13 @@ impl Overlay {
                 Mode::Window | Mode::Fullscreen => CursorKind::Pointer,
             };
         };
-        if let Some(h) = self.handle_at(self.cursor) {
+        let inside = sel.rect.contains(self.cursor);
+        if let Some(cursor) = self.markup_cursor(inside) {
+            return cursor;
+        }
+        if let Some(h) = self.handle_at() {
             return handle_cursor(h);
         }
-        let inside = sel.rect.contains(self.cursor);
         if self.adjustable() {
             return if inside {
                 CursorKind::Move
@@ -1844,6 +2344,16 @@ impl Overlay {
             Tool::Eraser => CursorKind::Pointer,
             _ => CursorKind::Crosshair,
         }
+    }
+}
+
+fn grip_cursor(g: Grip) -> CursorKind {
+    match g {
+        Grip::N | Grip::S => CursorKind::ResizeNs,
+        Grip::E | Grip::W => CursorKind::ResizeEw,
+        Grip::Ne | Grip::Sw => CursorKind::ResizeNesw,
+        Grip::Nw | Grip::Se => CursorKind::ResizeNwse,
+        Grip::A | Grip::B => CursorKind::Move,
     }
 }
 

@@ -26,6 +26,15 @@ pub enum Item {
     Cancel,
     /// Wait this many seconds before snipping (the delay button's choices).
     Delay(u32),
+    /// The markup object that was right-clicked.
+    DeleteMarkup,
+    DuplicateMarkup,
+    RecolorMarkup,
+    MarkupToFront,
+    MarkupToBack,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
 }
 
 /// The waits the delay button offers.
@@ -61,18 +70,41 @@ impl Overlay {
     /// Right click: open the menu for whatever is under the pointer.
     pub(super) fn open_menu(&mut self) {
         self.commit_text();
-        let at = self.cursor;
-        let (x, y) = (at.x as i32, at.y as i32);
+        let at = self.mouse;
+        let p = self.cursor;
+        let (x, y) = (p.x as i32, p.y as i32);
         let color = if x >= 0 && y >= 0 && x < self.w as i32 && y < self.h as i32 {
             Color::from_u32(self.px[(y as u32 * self.w + x as u32) as usize])
         } else {
             Color::BLACK
         };
         let window = self
-            .window_at(at)
+            .window_at(p)
             .filter(|w| self.selection() != Some(w.rect));
         let mut items: Vec<Option<Item>> = Vec::new();
         let has_sel = self.sel.is_some();
+        // Right-clicking markup picks it and offers what can be done to it.
+        let inside = self.sel.as_ref().is_some_and(|s| s.rect.contains(p));
+        let on_picked = self.picked_markup().is_some_and(|a| {
+            self.edits_markup() && (self.grip_at(a).is_some() || self.on_picked_body(a, p, inside))
+        });
+        let markup = if on_picked {
+            self.picked
+        } else {
+            self.markup_at(p)
+        };
+        if let Some(i) = markup {
+            self.picked = Some(i);
+            let a = &self.annotations[i];
+            items.extend([Some(Item::DeleteMarkup), Some(Item::DuplicateMarkup)]);
+            if a.has_style() && a.color != self.color {
+                items.push(Some(Item::RecolorMarkup));
+            }
+            if self.annotations.len() > 1 {
+                items.extend([Some(Item::MarkupToFront), Some(Item::MarkupToBack)]);
+            }
+            items.push(None);
+        }
         match (has_sel, self.ui.kind) {
             (true, Kind::Snip) => {
                 items.extend([
@@ -93,6 +125,10 @@ impl Overlay {
         }
         if !has_sel {
             items.push(Some(Item::SnipScreen));
+        }
+        items.push(Some(Item::ZoomIn));
+        if self.zoom > 1.0 {
+            items.extend([Some(Item::ZoomOut), Some(Item::ZoomReset)]);
         }
         items.push(Some(Item::CopyColor));
         items.push(Some(Item::CopyColorRgb));
@@ -172,7 +208,7 @@ impl Overlay {
             .bars()
             .iter()
             .flat_map(|b| b.slots.iter())
-            .find(|sl| sl.rect.contains(self.cursor))
+            .find(|sl| sl.rect.contains(self.mouse))
             .map(|sl| (sl.btn, sl.rect));
         match slot {
             Some((super::Btn::Delay, r)) => {
@@ -213,6 +249,14 @@ impl Overlay {
             Item::Cancel => "Close".into(),
             Item::Delay(1) => "1 second".into(),
             Item::Delay(n) => format!("{n} seconds"),
+            Item::DeleteMarkup => "Delete".into(),
+            Item::DuplicateMarkup => "Duplicate".into(),
+            Item::RecolorMarkup => "Use the selected colour".into(),
+            Item::MarkupToFront => "Bring to front".into(),
+            Item::MarkupToBack => "Send to back".into(),
+            Item::ZoomIn => "Zoom in".into(),
+            Item::ZoomOut => "Zoom out".into(),
+            Item::ZoomReset => format!("Actual size ({:.0} %)", self.zoom * 100.0),
         }
     }
 
@@ -242,6 +286,14 @@ impl Overlay {
             Item::Undo => Icon::Undo,
             Item::StartOver => Icon::ModeRect,
             Item::Cancel => Icon::Close,
+            Item::DeleteMarkup => Icon::Trash,
+            Item::DuplicateMarkup => Icon::Copy,
+            Item::RecolorMarkup => Icon::Pipette,
+            Item::MarkupToFront => Icon::ToFront,
+            Item::MarkupToBack => Icon::ToBack,
+            Item::ZoomIn => Icon::ZoomIn,
+            Item::ZoomOut => Icon::ZoomOut,
+            Item::ZoomReset => Icon::ModeFull,
         }
     }
 
@@ -251,7 +303,17 @@ impl Overlay {
         } else {
             "Ctrl"
         };
+        let mac = ctrl == "Cmd";
         match item {
+            Item::DeleteMarkup => &["Del"],
+            Item::DuplicateMarkup if mac => &["Cmd", "D"],
+            Item::DuplicateMarkup => &["Ctrl", "D"],
+            Item::ZoomIn if mac => &["Cmd", "+"],
+            Item::ZoomIn => &["Ctrl", "+"],
+            Item::ZoomOut if mac => &["Cmd", "-"],
+            Item::ZoomOut => &["Ctrl", "-"],
+            Item::ZoomReset if mac => &["Cmd", "0"],
+            Item::ZoomReset => &["Ctrl", "0"],
             Item::Copy | Item::StartRecording => &["Enter"],
             Item::SaveAs => {
                 if ctrl == "Cmd" {
@@ -389,6 +451,14 @@ impl Overlay {
             Item::StartOver => self.clear_selection(),
             Item::Cancel => self.outcome = Some(Outcome::Cancel),
             Item::Delay(n) => self.ui.delay = n,
+            Item::DeleteMarkup => self.delete_markup(),
+            Item::DuplicateMarkup => self.duplicate_markup(),
+            Item::RecolorMarkup => self.restyle_markup(true),
+            Item::MarkupToFront => self.markup_to_front(),
+            Item::MarkupToBack => self.markup_to_back(),
+            Item::ZoomIn => self.zoom_by(super::KEY_ZOOM, menu.at),
+            Item::ZoomOut => self.zoom_by(1.0 / super::KEY_ZOOM, menu.at),
+            Item::ZoomReset => self.reset_zoom(),
         }
     }
 
@@ -428,14 +498,16 @@ impl Overlay {
             }
             let cy = r.y + r.h / 2.0;
             let icon_c = Pt::new(r.x + 16.0 * s, cy);
-            if matches!(
-                item,
-                Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl
-            ) {
+            let swatch = match item {
+                Item::CopyColor | Item::CopyColorRgb | Item::CopyColorHsl => Some(menu.color),
+                Item::RecolorMarkup => Some(self.color),
+                _ => None,
+            };
+            if let Some(color) = swatch {
                 c.fill_rrect(
                     RectF::new(icon_c.x - 7.0 * s, cy - 7.0 * s, 14.0 * s, 14.0 * s),
                     4.0 * s,
-                    menu.color,
+                    color,
                 );
             } else if let Some(icon) = self.entry_icon(*item) {
                 icons::draw(c, icon, icon_c, 16.0 * s, theme::ICON);

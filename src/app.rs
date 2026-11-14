@@ -1257,6 +1257,7 @@ impl App {
                 let button = match button {
                     MouseButton::Left => Button::Left,
                     MouseButton::Right => Button::Right,
+                    MouseButton::Middle => Button::Middle,
                     _ => return,
                 };
                 self.alt_tap = false;
@@ -1274,9 +1275,10 @@ impl App {
                     .pointer_button(button, state == ElementState::Pressed);
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                // In notches of a mouse wheel (touchpads report pixels).
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y,
-                    MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
                 };
                 session.wins[idx].overlay.scroll(dy);
             }

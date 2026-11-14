@@ -1646,3 +1646,295 @@ fn preview_toolbar() {
     click(&mut o, (more.x, more.y));
     shoot(&mut o, "more");
 }
+
+// ---- picking markup and zoom -------------------------------------------------
+
+#[test]
+fn blur_stays_editable_moves_resizes_and_deletes() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 500.0));
+    o.activate(Btn::Tool(Tool::Blur));
+    drag(&mut o, (100.0, 100.0), (200.0, 180.0));
+    assert_eq!(o.picked, Some(0), "a new shape stays picked");
+    let frame = |o: &Overlay| o.annotations[0].frame();
+
+    // With the blur tool still active, the picked blur moves...
+    drag(&mut o, (150.0, 140.0), (170.0, 150.0));
+    assert_eq!(o.annotation_count(), 1, "dragging it did not draw another");
+    assert_eq!(frame(&o), RectF::new(120.0, 110.0, 100.0, 80.0));
+    // ...and its bottom-right handle resizes it.
+    drag(&mut o, (220.0, 190.0), (260.0, 220.0));
+    assert_eq!(frame(&o), RectF::new(120.0, 110.0, 140.0, 110.0));
+    assert_eq!(o.selection(), Some(RectI::new(20, 20, 580, 480)));
+
+    o.key(Key::Delete);
+    assert_eq!(o.annotation_count(), 0);
+    o.undo();
+    assert_eq!(frame(&o), RectF::new(120.0, 110.0, 140.0, 110.0));
+    o.undo();
+    assert_eq!(frame(&o), RectF::new(120.0, 110.0, 100.0, 80.0));
+    o.undo();
+    assert_eq!(frame(&o), RectF::new(100.0, 100.0, 100.0, 80.0));
+}
+
+#[test]
+fn select_tool_picks_markup_and_moves_the_area_elsewhere() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 500.0));
+    o.activate(Btn::Tool(Tool::Arrow));
+    drag(&mut o, (100.0, 300.0), (300.0, 300.0));
+    o.activate(Btn::Tool(Tool::Rect));
+    drag(&mut o, (350.0, 100.0), (450.0, 200.0));
+    o.activate(Btn::Tool(Tool::Select));
+    assert_eq!(o.picked, Some(1));
+
+    // Clicking the arrow picks it; its end point drags on its own.
+    click(&mut o, (200.0, 301.0));
+    assert_eq!(o.picked, Some(0));
+    drag(&mut o, (300.0, 300.0), (300.0, 400.0));
+    match o.annotations[0].shape {
+        Shape::Line { a, b, .. } => {
+            assert_eq!((a.x, a.y), (100.0, 300.0));
+            assert_eq!((b.x, b.y), (300.0, 400.0));
+        }
+        ref s => panic!("expected a line, got {s:?}"),
+    }
+
+    // Empty space un-picks and moves the area, as before.
+    drag(&mut o, (500.0, 450.0), (510.0, 460.0));
+    assert_eq!(o.picked, None);
+    assert_eq!(o.selection(), Some(RectI::new(30, 30, 580, 480)));
+
+    // Escape un-picks before it drops the selection.
+    click(&mut o, (350.0, 150.0));
+    assert_eq!(o.picked, Some(1));
+    o.key(Key::Escape);
+    assert_eq!(o.picked, None);
+    assert!(o.selection().is_some());
+}
+
+#[test]
+fn shapes_drawn_inside_a_picked_rectangle_are_new_shapes() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 500.0));
+    o.activate(Btn::Tool(Tool::Rect));
+    drag(&mut o, (100.0, 100.0), (400.0, 400.0));
+    drag(&mut o, (200.0, 200.0), (300.0, 300.0));
+    assert_eq!(o.annotation_count(), 2);
+}
+
+fn menu_items(o: &Overlay) -> Vec<menu::Item> {
+    o.menu
+        .as_ref()
+        .expect("menu open")
+        .items
+        .iter()
+        .flatten()
+        .copied()
+        .collect()
+}
+
+fn run_item(o: &mut Overlay, item: menu::Item) {
+    let i = o
+        .menu
+        .as_ref()
+        .unwrap()
+        .items
+        .iter()
+        .position(|it| *it == Some(item))
+        .unwrap_or_else(|| panic!("{item:?} not in the menu"));
+    o.run_menu(i);
+}
+
+#[test]
+fn right_click_on_markup_offers_its_own_actions() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 500.0));
+    o.activate(Btn::Tool(Tool::Ellipse));
+    drag(&mut o, (100.0, 100.0), (200.0, 200.0));
+    o.activate(Btn::Tool(Tool::Pixelate));
+    drag(&mut o, (300.0, 300.0), (400.0, 400.0));
+
+    // Empty space: the usual menu.
+    right_click(&mut o, Pt::new(500.0, 150.0));
+    assert!(!menu_items(&o).contains(&menu::Item::DeleteMarkup));
+    o.key(Key::Escape);
+
+    // On the ellipse's outline, with another tool active: it gets picked.
+    right_click(&mut o, Pt::new(200.0, 150.0));
+    assert_eq!(o.picked, Some(0));
+    let items = menu_items(&o);
+    assert!(items.contains(&menu::Item::DeleteMarkup));
+    assert!(items.contains(&menu::Item::MarkupToFront));
+    run_item(&mut o, menu::Item::MarkupToFront);
+    assert!(matches!(o.annotations[1].shape, Shape::Ellipse(_)));
+    assert_eq!(o.picked, Some(1));
+
+    right_click(&mut o, Pt::new(350.0, 350.0));
+    run_item(&mut o, menu::Item::DuplicateMarkup);
+    assert_eq!(o.annotation_count(), 3);
+    right_click(&mut o, Pt::new(350.0, 350.0));
+    run_item(&mut o, menu::Item::DeleteMarkup);
+    assert_eq!(o.annotation_count(), 2);
+}
+
+#[test]
+fn colours_and_sizes_apply_to_the_picked_object() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 500.0));
+    o.activate(Btn::Tool(Tool::Rect));
+    drag(&mut o, (100.0, 100.0), (200.0, 200.0));
+    o.activate(Btn::Tool(Tool::Select));
+    assert!(
+        o.bars().props.is_some(),
+        "the picked rectangle shows its colours"
+    );
+    o.activate(Btn::Color(4));
+    assert_eq!(o.annotations[0].color, theme::PALETTE[4]);
+    o.activate(Btn::Width(2));
+    assert_eq!(o.annotations[0].width, theme::WIDTHS[2]);
+    o.undo();
+    o.undo();
+    assert_eq!(o.annotations[0].color, theme::PALETTE[0]);
+}
+
+#[test]
+fn arrow_keys_nudge_the_picked_object_as_one_step() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (20.0, 20.0), (600.0, 500.0));
+    o.activate(Btn::Tool(Tool::Rect));
+    drag(&mut o, (100.0, 100.0), (200.0, 200.0));
+    for _ in 0..3 {
+        o.key(Key::Right);
+    }
+    assert_eq!(o.annotations[0].frame().x, 103.0);
+    assert_eq!(o.selection(), Some(RectI::new(20, 20, 580, 480)));
+    o.undo();
+    assert_eq!(o.annotations[0].frame().x, 100.0);
+}
+
+#[test]
+fn zoom_magnifies_and_maps_the_pointer() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (900.0, 700.0));
+    o.pointer_moved(400.0, 300.0);
+    o.zoom_by(4.0, Pt::new(400.0, 300.0));
+    assert_eq!(o.zoom(), 4.0);
+    // The pixel under the pointer stays under it.
+    assert_eq!(o.cursor, Pt::new(400.0, 300.0));
+
+    let mut buf = vec![0u32; (W * H) as usize];
+    o.render(&mut buf, W, H);
+    let at = |x: u32, y: u32| buf[(y * W + x) as usize];
+    assert_eq!(at(400, 300), src_px(400, 300));
+    assert_eq!(at(403, 303), src_px(400, 300), "one pixel is 4 x 4 now");
+    assert_eq!(at(404, 304), src_px(401, 301));
+
+    // Drawing while zoomed lands on the screenshot pixels under the pointer.
+    o.activate(Btn::Tool(Tool::Rect));
+    drag(&mut o, (400.0, 300.0), (480.0, 380.0));
+    assert_eq!(
+        o.annotations[0].frame(),
+        RectF::new(400.0, 300.0, 20.0, 20.0)
+    );
+
+    // Ctrl+0 shows it at actual size again, Ctrl + wheel zooms.
+    ctrl_key(&mut o, '0', false);
+    assert_eq!(o.zoom(), 1.0);
+    o.set_mods(Mods {
+        ctrl: true,
+        ..Mods::default()
+    });
+    o.scroll(1.0);
+    o.set_mods(Mods::default());
+    assert!((o.zoom() - 1.2).abs() < 1e-4);
+}
+
+#[test]
+fn the_zoomed_view_pans_and_stays_on_the_screenshot() {
+    let mut o = overlay(Mode::Rect);
+    o.pointer_moved(500.0, 400.0);
+    o.zoom_by(2.0, Pt::new(500.0, 400.0));
+    assert_eq!(o.view, Pt::new(250.0, 200.0));
+    o.pointer_button(Button::Middle, true);
+    o.pointer_moved(300.0, 400.0); // drag left: the view moves right
+    o.pointer_button(Button::Middle, false);
+    assert_eq!(o.view, Pt::new(350.0, 200.0));
+    assert!(!o.has_selection(), "panning is not selecting");
+    o.pointer_button(Button::Middle, true);
+    o.pointer_moved(-3000.0, -3000.0);
+    o.pointer_button(Button::Middle, false);
+    assert_eq!(o.view, Pt::new(500.0, 400.0), "clamped to the far corner");
+    o.scroll(1.0); // the wheel scrolls up
+    assert!(o.view.y < 400.0);
+}
+
+#[test]
+fn editing_markup_renders_incrementally_like_full_frames() {
+    let mut o = overlay(Mode::Rect);
+    let mut fc = FrameCheck::new(&mut o);
+    fc.drag(&mut o, (60.0, 60.0), (640.0, 460.0), "selection");
+    o.activate(Btn::Tool(Tool::Blur));
+    fc.drag(&mut o, (150.0, 150.0), (260.0, 240.0), "blur");
+    fc.drag(&mut o, (200.0, 200.0), (300.0, 260.0), "moving the blur");
+    fc.drag(&mut o, (360.0, 300.0), (420.0, 380.0), "resizing the blur");
+    o.activate(Btn::Tool(Tool::Select));
+    fc.moves(&mut o, (500.0, 400.0), (300.0, 280.0), "hovering markup");
+    o.key(Key::Delete);
+    fc.step(&mut o, "deleted");
+    o.zoom_by(3.0, Pt::new(300.0, 300.0));
+    fc.step(&mut o, "zoomed in");
+    fc.moves(&mut o, (300.0, 300.0), (350.0, 320.0), "zoomed, moving");
+    o.reset_zoom();
+    fc.step(&mut o, "back to actual size");
+    fc.moves(&mut o, (350.0, 320.0), (200.0, 220.0), "after zooming");
+}
+
+/// `KRAB_PREVIEW=out cargo test --lib preview_markup_editing -- --ignored`
+/// writes out-picked.png, out-menu.png and out-zoom.png.
+#[test]
+#[ignore]
+fn preview_markup_editing() {
+    let mut o = overlay(Mode::Rect);
+    o.px = (0..W * H)
+        .map(|i| {
+            let (x, y) = (i % W, i / W);
+            if (x / 40 + y / 40) % 2 == 0 {
+                0xFFF4_F5F7
+            } else {
+                0xFFE2_E5EA
+            }
+        })
+        .collect();
+    let base = std::env::var("KRAB_PREVIEW").unwrap_or_else(|_| "preview".into());
+    let shoot = |o: &mut Overlay, name: &str| {
+        let mut buf = vec![0u32; (W * H) as usize];
+        o.render(&mut buf, W, H);
+        image::save_buffer(
+            format!("{base}-{name}.png"),
+            &crate::gfx::argb_to_rgba(&buf),
+            W,
+            H,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    };
+    drag(&mut o, (40.0, 40.0), (960.0, 560.0));
+    o.activate(Btn::Tool(Tool::Arrow));
+    drag(&mut o, (120.0, 400.0), (380.0, 220.0));
+    o.activate(Btn::Tool(Tool::Text));
+    click(&mut o, (500.0, 120.0));
+    o.text_input("Resizable text");
+    o.key(Key::Enter);
+    o.activate(Btn::Tool(Tool::Blur));
+    drag(&mut o, (520.0, 260.0), (820.0, 380.0));
+    o.activate(Btn::Tool(Tool::Select));
+    o.pointer_moved(300.0, 268.0);
+    shoot(&mut o, "picked");
+    right_click(&mut o, Pt::new(600.0, 300.0));
+    shoot(&mut o, "menu");
+    o.key(Key::Escape);
+    o.zoom_by(3.0, Pt::new(560.0, 280.0));
+    o.pointer_moved(700.0, 500.0);
+    shoot(&mut o, "zoom");
+}

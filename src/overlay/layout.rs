@@ -185,7 +185,7 @@ impl Overlay {
             Btn::Delay => format!("Snip in {} s", self.ui.delay),
             Btn::Cancel => "Close   Esc".into(),
             Btn::Tool(t) => match t {
-                Tool::Select => "Move / resize   V",
+                Tool::Select => "Select, move, resize   V",
                 Tool::Pen => "Pen   P",
                 Tool::Highlighter => "Highlighter   H",
                 Tool::Line => "Line   L",
@@ -320,9 +320,10 @@ impl Overlay {
         // the toolbar does not jump when one of them opens.
         let reserve = if record { 0.0 } else { mh + gap * 0.75 };
 
-        let r = sel.rect;
-        let below_y = r.bottom() + gap;
-        let above_y = r.y - gap - block_h;
+        // Zoomed in, the selection may reach past the window: the bars stay on it.
+        let r = self.rect_to_screen(sel.rect);
+        let below_y = (r.bottom() + gap).max(margin);
+        let above_y = (r.y - gap - block_h).min(sh - margin - block_h);
         let (my, above, props_below) = if below_y + block_h + reserve <= sh - margin {
             (below_y, false, true)
         } else if above_y - reserve >= margin {
@@ -367,7 +368,9 @@ impl Overlay {
                 palette.push(self.build_bar(row, x, y, btn_h));
             }
         }
-        let props = (!record && palette.is_empty() && self.tool.has_style()).then(|| {
+        // A picked object can take a colour and size, whatever the tool.
+        let styled = self.tool.has_style() || self.picked_markup().is_some_and(|a| a.has_style());
+        let props = (!record && palette.is_empty() && styled).then(|| {
             let py = if props_below {
                 my + block_h + gap * 0.75
             } else {

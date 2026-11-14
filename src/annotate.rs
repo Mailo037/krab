@@ -147,6 +147,61 @@ pub struct Annotation {
     pub width: f32,
 }
 
+/// A handle that reshapes a markup object once it is picked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grip {
+    Nw,
+    N,
+    Ne,
+    E,
+    Se,
+    S,
+    Sw,
+    W,
+    /// The first end point of a line.
+    A,
+    /// The second end point of a line, or the tip of a callout.
+    B,
+}
+
+/// `from` with the corner or edge `grip` dragged to `p`. With `keep_ratio`
+/// a corner scales the box evenly, anchored at the opposite corner.
+fn regrip(from: RectF, grip: Grip, p: Pt, keep_ratio: bool) -> RectF {
+    let (x0, y0, x1, y1) = (from.x, from.y, from.right(), from.bottom());
+    let corner = match grip {
+        Grip::Nw => Some(((x0, y0), (x1, y1))),
+        Grip::Ne => Some(((x1, y0), (x0, y1))),
+        Grip::Se => Some(((x1, y1), (x0, y0))),
+        Grip::Sw => Some(((x0, y1), (x1, y0))),
+        _ => None,
+    };
+    if let (true, Some(((cx, cy), (ax, ay)))) = (keep_ratio, corner) {
+        let (vx, vy) = (cx - ax, cy - ay);
+        let len2 = vx * vx + vy * vy;
+        if len2 > 0.0 {
+            let k = (((p.x - ax) * vx + (p.y - ay) * vy) / len2).max(0.05);
+            return RectF::from_points(Pt::new(ax, ay), Pt::new(ax + vx * k, ay + vy * k));
+        }
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (x0, y0, x1, y1);
+    match grip {
+        Grip::N | Grip::Ne | Grip::Nw => y0 = p.y,
+        Grip::S | Grip::Se | Grip::Sw => y1 = p.y,
+        _ => {}
+    }
+    match grip {
+        Grip::W | Grip::Nw | Grip::Sw => x0 = p.x,
+        Grip::E | Grip::Ne | Grip::Se => x1 = p.x,
+        _ => {}
+    }
+    RectF::from_points(Pt::new(x0, y0), Pt::new(x1, y1))
+}
+
+fn shift(p: &mut Pt, dx: f32, dy: f32) {
+    p.x += dx;
+    p.y += dy;
+}
+
 /// The frozen screenshot annotations are drawn over (needed by pixelate).
 pub struct Source<'a> {
     pub px: &'a [u32],
@@ -391,6 +446,160 @@ impl Annotation {
         }
     }
 
+    /// The box the object is resized by.
+    pub fn frame(&self) -> RectF {
+        match &self.shape {
+            Shape::Stroke { pts, .. } => {
+                let mut r = RectF::new(pts[0].x, pts[0].y, 0.0, 0.0);
+                for p in pts {
+                    r = r.union(&RectF::new(p.x, p.y, 0.0, 0.0));
+                }
+                r
+            }
+            Shape::Line { a, b, .. } | Shape::Measure { a, b, .. } => RectF::from_points(*a, *b),
+            Shape::Rect(r)
+            | Shape::Ellipse(r)
+            | Shape::Pixelate(r)
+            | Shape::Blur(r)
+            | Shape::Fill(r) => *r,
+            Shape::Text { pos, text, size } => {
+                let (w, h) = text_size(text, *size);
+                RectF::new(pos.x, pos.y, w, h)
+            }
+            Shape::Step { at, r, .. } => RectF::new(at.x - r, at.y - r, 2.0 * r, 2.0 * r),
+            Shape::Callout {
+                pos, text, size, ..
+            } => callout_box(*pos, text, *size),
+        }
+    }
+
+    /// The end points of an object reshaped by them instead of a box.
+    pub fn ends(&self) -> Option<(Pt, Pt)> {
+        match &self.shape {
+            Shape::Line { a, b, .. } | Shape::Measure { a, b, .. } => Some((*a, *b)),
+            Shape::Stroke { pts, .. } if pts.len() == 2 => Some((pts[0], pts[1])),
+            _ => None,
+        }
+    }
+
+    /// Whether a colour and size apply (pixelate, blur and redaction boxes
+    /// have neither).
+    pub fn has_style(&self) -> bool {
+        !matches!(
+            self.shape,
+            Shape::Pixelate(_) | Shape::Blur(_) | Shape::Fill(_)
+        )
+    }
+
+    /// The handles of a picked object and where they sit.
+    pub fn grips(&self) -> Vec<(Grip, Pt)> {
+        if let Some((a, b)) = self.ends() {
+            return vec![(Grip::A, a), (Grip::B, b)];
+        }
+        let f = self.frame();
+        let (cx, cy) = (f.x + f.w / 2.0, f.y + f.h / 2.0);
+        let mut grips = vec![
+            (Grip::Nw, Pt::new(f.x, f.y)),
+            (Grip::Ne, Pt::new(f.right(), f.y)),
+            (Grip::Se, Pt::new(f.right(), f.bottom())),
+            (Grip::Sw, Pt::new(f.x, f.bottom())),
+        ];
+        match &self.shape {
+            // Text and markers only scale evenly: corners are enough.
+            Shape::Text { .. } | Shape::Step { .. } => {}
+            Shape::Callout { tip, .. } => grips.push((Grip::B, *tip)),
+            _ => grips.extend([
+                (Grip::N, Pt::new(cx, f.y)),
+                (Grip::E, Pt::new(f.right(), cy)),
+                (Grip::S, Pt::new(cx, f.bottom())),
+                (Grip::W, Pt::new(f.x, cy)),
+            ]),
+        }
+        grips
+    }
+
+    /// Move the whole object.
+    pub fn translate(&mut self, dx: f32, dy: f32) {
+        match &mut self.shape {
+            Shape::Stroke { pts, .. } => pts.iter_mut().for_each(|p| shift(p, dx, dy)),
+            Shape::Line { a, b, .. } | Shape::Measure { a, b, .. } => {
+                shift(a, dx, dy);
+                shift(b, dx, dy);
+            }
+            Shape::Rect(r)
+            | Shape::Ellipse(r)
+            | Shape::Pixelate(r)
+            | Shape::Blur(r)
+            | Shape::Fill(r) => {
+                r.x += dx;
+                r.y += dy;
+            }
+            Shape::Text { pos, .. } => shift(pos, dx, dy),
+            Shape::Step { at, .. } => shift(at, dx, dy),
+            Shape::Callout { tip, pos, .. } => {
+                shift(tip, dx, dy);
+                shift(pos, dx, dy);
+            }
+        }
+    }
+
+    /// This object with `grip` dragged to `p`. With `keep_ratio` a corner
+    /// scales the object evenly (text, markers and callouts always do).
+    pub fn with_grip(&self, grip: Grip, p: Pt, keep_ratio: bool) -> Annotation {
+        let mut out = self.clone();
+        match (&mut out.shape, grip) {
+            (Shape::Line { a, .. } | Shape::Measure { a, .. }, Grip::A) => *a = p,
+            (Shape::Line { b, .. } | Shape::Measure { b, .. }, Grip::B) => *b = p,
+            (Shape::Stroke { pts, .. }, Grip::A) if pts.len() == 2 => pts[0] = p,
+            (Shape::Stroke { pts, .. }, Grip::B) if pts.len() == 2 => pts[1] = p,
+            (Shape::Callout { tip, .. }, Grip::B) => *tip = p,
+            (_, Grip::A | Grip::B) => {}
+            _ => {
+                let from = self.frame();
+                let even = matches!(
+                    self.shape,
+                    Shape::Text { .. } | Shape::Step { .. } | Shape::Callout { .. }
+                );
+                out.refit(from, regrip(from, grip, p, keep_ratio || even));
+            }
+        }
+        out
+    }
+
+    /// Stretch the object from the box `from` to the box `to`.
+    fn refit(&mut self, from: RectF, to: RectF) {
+        let sx = if from.w > 0.0 { to.w / from.w } else { 1.0 };
+        let sy = if from.h > 0.0 { to.h / from.h } else { 1.0 };
+        let map = |q: Pt| Pt::new(to.x + (q.x - from.x) * sx, to.y + (q.y - from.y) * sy);
+        match &mut self.shape {
+            Shape::Stroke { pts, .. } => pts.iter_mut().for_each(|q| *q = map(*q)),
+            Shape::Line { a, b, .. } | Shape::Measure { a, b, .. } => {
+                *a = map(*a);
+                *b = map(*b);
+            }
+            Shape::Rect(r)
+            | Shape::Ellipse(r)
+            | Shape::Pixelate(r)
+            | Shape::Blur(r)
+            | Shape::Fill(r) => *r = to,
+            Shape::Text { pos, size, .. } => {
+                *size = (*size * sy).max(4.0);
+                *pos = Pt::new(to.x, to.y);
+            }
+            Shape::Step { at, r, .. } => {
+                *r = (to.w.min(to.h) / 2.0).max(3.0);
+                *at = to.center();
+            }
+            // The bubble scales; the tail keeps pointing where it did.
+            Shape::Callout { pos, size, .. } => {
+                let s = (*size * sy).max(4.0);
+                *size = s;
+                let pad = s * 0.55;
+                *pos = Pt::new(to.x + pad, to.y + pad * 0.6);
+            }
+        }
+    }
+
     /// Whether `p` touches the visible ink (used by the eraser).
     pub fn hit(&self, p: Pt, tol: f32) -> bool {
         match &self.shape {
@@ -573,6 +782,57 @@ mod tests {
             measure_label(Pt::new(0.0, 0.0), Pt::new(30.0, 40.0)),
             "50 px  \u{00B7}  30 \u{00D7} 40"
         );
+    }
+
+    #[test]
+    fn grips_reshape_boxes_lines_and_text() {
+        let r = ann(Shape::Rect(RectF::new(10.0, 10.0, 100.0, 50.0)));
+        let wider = r.with_grip(Grip::E, Pt::new(150.0, 999.0), false);
+        assert_eq!(wider.frame(), RectF::new(10.0, 10.0, 140.0, 50.0));
+        // Dragged past the opposite edge, the box flips instead of inverting.
+        let flipped = r.with_grip(Grip::W, Pt::new(130.0, 0.0), false);
+        assert_eq!(flipped.frame(), RectF::new(110.0, 10.0, 20.0, 50.0));
+        // Keeping the ratio, a corner scales from the opposite corner.
+        let even = r.with_grip(Grip::Se, Pt::new(210.0, 110.0), true);
+        assert_eq!(even.frame(), RectF::new(10.0, 10.0, 200.0, 100.0));
+
+        let l = ann(Shape::Line {
+            a: Pt::new(0.0, 0.0),
+            b: Pt::new(10.0, 0.0),
+            arrow: true,
+        });
+        assert_eq!(l.grips().len(), 2);
+        let moved = l.with_grip(Grip::B, Pt::new(20.0, 20.0), false);
+        assert_eq!(moved.ends(), Some((Pt::new(0.0, 0.0), Pt::new(20.0, 20.0))));
+
+        let t = ann(Shape::Text {
+            pos: Pt::new(0.0, 0.0),
+            text: "Krab".into(),
+            size: 20.0,
+        });
+        let f = t.frame();
+        let big = t.with_grip(Grip::Se, Pt::new(f.w * 2.0, f.h * 2.0), false);
+        match big.shape {
+            Shape::Text { size, pos, .. } => {
+                assert!((size - 40.0).abs() < 0.01);
+                assert_eq!(pos, Pt::new(0.0, 0.0));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn translate_moves_every_point() {
+        let mut c = ann(Shape::Callout {
+            tip: Pt::new(5.0, 5.0),
+            pos: Pt::new(50.0, 50.0),
+            text: "Hi".into(),
+            size: 14.0,
+        });
+        let before = c.bounds();
+        c.translate(10.0, -4.0);
+        let after = c.bounds();
+        assert_eq!((after.x - before.x, after.y - before.y), (10.0, -4.0));
     }
 
     #[test]
