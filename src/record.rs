@@ -6,6 +6,7 @@
 //! graphics card when it can, optionally with sound; without it Krab falls
 //! back to an animated GIF, which needs no external tools.
 
+use crate::annotate::{Annotation, Source};
 use crate::audio;
 use crate::capture::RegionGrabber;
 use crate::geom::{Pt, RectI};
@@ -108,6 +109,53 @@ impl Control {
     }
 }
 
+/// Markup drawn over a running recording. The window the user draws in is
+/// kept out of the capture, so every frame gets the markup painted in here:
+/// crisp, and without the toolbars around it.
+#[derive(Debug, Default)]
+pub struct LiveMarkup {
+    list: Mutex<Vec<Annotation>>,
+    /// UI scale of the monitor (text and step markers are sized by it).
+    scale: f32,
+}
+
+impl LiveMarkup {
+    pub fn new(scale: f32) -> LiveMarkup {
+        LiveMarkup {
+            list: Mutex::new(Vec::new()),
+            scale,
+        }
+    }
+
+    /// Replace the markup (pixels of the recorded monitor).
+    pub fn set(&self, list: Vec<Annotation>) {
+        *self.list.lock().unwrap() = list;
+    }
+
+    pub fn get(&self) -> Vec<Annotation> {
+        self.list.lock().unwrap().clone()
+    }
+
+    /// Paint the markup onto a `w` x `h` frame whose top-left corner is at
+    /// `origin` on the monitor.
+    fn draw(&self, frame: &mut [u32], w: u32, h: u32, origin: (i32, i32)) {
+        let list = self.list.lock().unwrap();
+        if list.is_empty() || frame.len() != (w * h) as usize {
+            return;
+        }
+        // Live markup never uses tools that read the picture underneath.
+        let src = Source {
+            px: &[],
+            w: 0,
+            h: 0,
+        };
+        let mut c = Canvas::new(frame, w, h).with_offset(-origin.0 as f32, -origin.1 as f32);
+        for a in list.iter() {
+            a.draw(&mut c, &src, self.scale);
+        }
+    }
+}
+
 /// How to record.
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -120,6 +168,8 @@ pub struct Settings {
     pub audio: audio::Source,
     /// "auto" uses a hardware encoder when one works, "software" never does.
     pub encoder: String,
+    /// Drawn into every frame.
+    pub markup: Option<Arc<LiveMarkup>>,
 }
 
 pub struct Recorder {
@@ -328,8 +378,12 @@ fn run(
     let (w, h) = (grabber.w, grabber.h);
     let origin = (native.x + local.x, native.y + local.y);
     let mut pointer = PointerMarks::new(s.clicks, origin);
+    let markup = s.markup.clone();
     let mut grab = |frame: &mut Vec<u32>| {
         grabber.grab(frame)?;
+        if let Some(m) = &markup {
+            m.draw(frame, w, h, (local.x, local.y));
+        }
         pointer.draw(frame, w, h);
         Ok(())
     };
@@ -782,6 +836,30 @@ mod tests {
         let mut marks = PointerMarks::new(true, (-100_000, -100_000));
         marks.draw(&mut frame, w, h);
         assert!(frame.iter().all(|p| *p == 0xFF00_0000));
+    }
+
+    #[test]
+    fn live_markup_is_drawn_where_it_lies_on_the_monitor() {
+        use crate::annotate::Shape;
+        use crate::geom::RectF;
+        let (w, h) = (40u32, 30u32);
+        let m = LiveMarkup::new(1.0);
+        let mut frame = vec![0xFF00_0000u32; (w * h) as usize];
+        m.draw(&mut frame, w, h, (100, 50));
+        assert!(
+            frame.iter().all(|p| *p == 0xFF00_0000),
+            "nothing to draw yet"
+        );
+        // A filled box at (110, 60) on the monitor: (10, 10) in the frame.
+        m.set(vec![Annotation {
+            shape: Shape::Fill(RectF::new(110.0, 60.0, 5.0, 5.0)),
+            color: Color::rgb(255, 0, 0),
+            width: 2.0,
+        }]);
+        m.draw(&mut frame, w, h, (100, 50));
+        assert_eq!(frame[(12 * w + 12) as usize], 0xFFFF_0000);
+        assert_eq!(frame[(2 * w + 2) as usize], 0xFF00_0000);
+        assert!(frame.iter().all(|p| p >> 24 == 0xFF), "frames stay opaque");
     }
 
     #[test]

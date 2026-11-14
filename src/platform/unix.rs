@@ -203,3 +203,40 @@ pub fn print_screen_opens_snipping_tool() -> bool {
 pub fn disable_snipping_tool_on_print_screen() -> std::io::Result<()> {
     Ok(())
 }
+
+/// Per-pixel transparent windows are only implemented on Windows; elsewhere
+/// recordings simply offer no live markup.
+pub struct LayerSurface;
+
+impl LayerSurface {
+    pub fn new(
+        _window: &winit::window::Window,
+        _origin: (i32, i32),
+        _w: u32,
+        _h: u32,
+    ) -> Option<LayerSurface> {
+        None
+    }
+
+    pub fn set_click_through(&mut self, _on: bool) {}
+
+    pub fn size(&self) -> (u32, u32) {
+        (0, 0)
+    }
+
+    pub fn pixels(&mut self) -> &mut [u32] {
+        &mut []
+    }
+
+    pub fn present(&mut self, _dirty: Option<crate::geom::RectI>) -> bool {
+        false
+    }
+}
+
+pub fn active_window() -> u64 {
+    0
+}
+
+pub fn activate_window(_id: u64) {}
+
+pub fn bring_to_top(_window: &winit::window::Window) {}

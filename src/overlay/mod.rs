@@ -84,6 +84,10 @@ pub enum Btn {
     Color(u8),
     Width(u8),
     Record,
+    /// Live markup: stop drawing and let the pointer reach the screen again.
+    Done,
+    /// Live markup: remove everything drawn.
+    Clear,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -391,6 +395,10 @@ pub struct Overlay {
     /// When the fades the last frame was in the middle of are over.
     fade_until: Option<Instant>,
     /// Tests stop the clock to check what a fade looks like part way.
+    /// A markup layer over a running recording (see [`Overlay::live`]).
+    live: bool,
+    /// The live layer is only showing its markup: no toolbars, no frame.
+    live_idle: bool,
     #[cfg(test)]
     clock: Option<Instant>,
 }
@@ -482,9 +490,129 @@ impl Overlay {
             shown: None,
             frame_time: Instant::now(),
             fade_until: None,
+            live: false,
+            live_idle: false,
             #[cfg(test)]
             clock: None,
         }
+    }
+
+    /// A markup layer over a running recording, `w` x `h` pixels (one
+    /// monitor). The background is transparent, the area being recorded,
+    /// `region`, is the fixed selection, and only tools that need no picture
+    /// underneath are offered. It starts out only showing the markup.
+    pub fn live(w: u32, h: u32, scale: f32, region: RectI, color: Color) -> Self {
+        let shot = Shot {
+            native: RectI::new(0, 0, w as i32, h as i32),
+            w,
+            h,
+            px: vec![0; (w * h) as usize],
+            scale,
+            primary: true,
+            name: String::new(),
+        };
+        let opts = Options {
+            loupe: false,
+            color,
+            ..Options::default()
+        };
+        let shared = Shared {
+            mode: Mode::Rect,
+            kind: Kind::Snip,
+            delay: 0,
+        };
+        let mut ov = Self::new(shot, &[], opts, shared);
+        ov.sel = Some(Selection {
+            rect: region
+                .intersect(&RectI::new(0, 0, w as i32, h as i32))
+                .to_f(),
+            mask: None,
+        });
+        ov.tool = Tool::Pen;
+        ov.live = true;
+        ov.live_idle = true;
+        ov
+    }
+
+    /// Live layer: take input and show the tools, or only show the markup.
+    pub fn set_drawing(&mut self, on: bool) {
+        if self.live_idle != on {
+            return;
+        }
+        self.live_idle = !on;
+        if !on {
+            if !matches!(self.drag, Drag::None) {
+                self.step_back();
+            }
+            self.drag = Drag::None;
+            self.commit_text();
+            self.palette = false;
+            self.picked = None;
+            self.hover_markup = None;
+            self.hover_btn = None;
+            self.menu = None;
+            self.cursor_inside = false;
+        }
+        // While drawing, the recorded area gets an all but invisible tint:
+        // a layered window lets clicks through where it is fully transparent.
+        let tint = if on { 0x0100_0000 } else { 0 };
+        if let Some(r) = self.sel.as_ref().map(|s| s.rect.round()) {
+            let w = self.w as usize;
+            for y in r.y..r.bottom() {
+                let o = y as usize * w;
+                self.px[o + r.x as usize..o + r.right() as usize].fill(tint);
+            }
+        }
+        self.layer = None;
+        self.prev = None;
+        self.dirty = true;
+    }
+
+    /// Only the markup tools that need no picture underneath are offered:
+    /// for recordings, and on the live layer over one.
+    pub(super) fn live_tools_only(&self) -> bool {
+        self.live || self.ui.kind == Kind::Record
+    }
+
+    /// Markup that can be carried over the live screen (not the kinds that
+    /// show the frozen picture underneath).
+    pub fn live_markup(&self) -> Vec<Annotation> {
+        self.markup()
+            .into_iter()
+            .filter(|a| {
+                !matches!(
+                    a.shape,
+                    Shape::Pixelate(_) | Shape::Blur(_) | Shape::Magnify { .. }
+                )
+            })
+            .collect()
+    }
+
+    /// Start the live layer with markup drawn before the recording began.
+    pub fn set_markup(&mut self, list: Vec<Annotation>) {
+        self.annotations = list;
+        self.picked = None;
+        self.ann_version += 1;
+        self.dirty = true;
+    }
+
+    pub fn is_drawing(&self) -> bool {
+        self.live && !self.live_idle
+    }
+
+    /// Everything the live layer shows of the markup right now, including
+    /// what is being drawn or typed, in this overlay's pixels.
+    pub fn markup(&self) -> Vec<Annotation> {
+        let mut all = self.annotations.clone();
+        all.extend(self.draft.clone());
+        if let Some(edit) = self
+            .text_edit
+            .as_ref()
+            .filter(|e| !e.text.trim().is_empty())
+        {
+            all.push(self.text_annotation(edit.pos, edit.text.clone(), edit.tip));
+        }
+        all
     }
 
     fn now(&self) -> Instant {
@@ -723,9 +851,7 @@ impl Overlay {
     /// Whether the selection can currently be moved / resized.
     fn adjustable(&self) -> bool {
         match &self.sel {
-            Some(s) => {
-                s.mask.is_none() && (self.ui.kind == Kind::Record || self.tool == Tool::Select)
-            }
+            Some(s) => !self.live && s.mask.is_none() && self.tool == Tool::Select,
             None => false,
         }
     }
@@ -939,27 +1065,30 @@ impl Overlay {
         if let Some(edit) = self.text_edit.take() {
             if !edit.text.trim().is_empty() {
                 self.checkpoint();
-                let shape = match edit.tip {
-                    Some(tip) => Shape::Callout {
-                        tip,
-                        pos: edit.pos,
-                        text: edit.text,
-                        size: self.text_em(),
-                    },
-                    None => Shape::Text {
-                        pos: edit.pos,
-                        text: edit.text,
-                        size: self.text_em(),
-                    },
-                };
-                self.annotations.push(Annotation {
-                    shape,
-                    color: self.color,
-                    width: self.stroke_width(),
-                });
+                let a = self.text_annotation(edit.pos, edit.text, edit.tip);
+                self.annotations.push(a);
                 self.picked = Some(self.annotations.len() - 1);
             }
             self.dirty = true;
+        }
+    }
+
+    /// Typed text as a markup object.
+    fn text_annotation(&self, pos: Pt, text: String, tip: Option<Pt>) -> Annotation {
+        let size = self.text_em();
+        let shape = match tip {
+            Some(tip) => Shape::Callout {
+                tip,
+                pos,
+                text,
+                size,
+            },
+            None => Shape::Text { pos, text, size },
+        };
+        Annotation {
+            shape,
+            color: self.color,
+            width: self.stroke_width(),
         }
     }
 
@@ -1015,6 +1144,9 @@ impl Overlay {
 
     fn finish(&mut self, kind: Finish) {
         self.commit_text();
+        if self.live {
+            return;
+        }
         if let Some(img) = self.compose() {
             self.outcome = Some(Outcome::Finish(kind, img));
         }
@@ -1225,6 +1357,8 @@ impl Overlay {
             }
             // Right click cancels a drag in progress, otherwise opens the menu.
             (Button::Right, true) if !matches!(self.drag, Drag::None) => self.step_back(),
+            // The live layer has no menu: nothing in it applies.
+            (Button::Right, true) if self.live => {}
             (Button::Right, true) => self.context_click(),
             (Button::Right, false) => {}
         }
@@ -1291,7 +1425,7 @@ impl Overlay {
         };
         let inside = sel.contains(p);
 
-        if self.ui.kind == Kind::Snip && self.press_markup(p, inside) {
+        if self.press_markup(p, inside) {
             return;
         }
 
@@ -1316,8 +1450,10 @@ impl Overlay {
         }
 
         if !inside {
-            // Clicking outside starts over, unless that would discard markup.
-            if self.annotations.is_empty()
+            // Clicking outside starts over, unless that would discard markup
+            // (or the area is being recorded).
+            if !self.live
+                && self.annotations.is_empty()
                 && (self.tool == Tool::Select || self.ui.kind == Kind::Record)
             {
                 self.clear_selection();
@@ -1696,7 +1832,7 @@ impl Overlay {
             self.palette = false;
         } else if self.picked.is_some() {
             self.picked = None;
-        } else if self.sel.is_some() {
+        } else if self.sel.is_some() && !self.live {
             self.clear_selection();
         } else {
             self.outcome = Some(Outcome::Cancel);
@@ -1708,9 +1844,16 @@ impl Overlay {
         if self.sel.is_none() {
             return;
         }
+        if self.live {
+            // Enter ends drawing on the live layer.
+            self.commit_text();
+            self.outcome = Some(Outcome::Cancel);
+            return;
+        }
         match self.ui.kind {
             Kind::Snip => self.finish(Finish::Copy),
             Kind::Record => {
+                self.commit_text();
                 if let Some(r) = self.selection() {
                     self.outcome = Some(Outcome::Record(r));
                 }
@@ -1784,7 +1927,11 @@ impl Overlay {
     }
 
     fn ctrl_shortcut(&mut self, c: char) {
-        match c.to_ascii_lowercase() {
+        let c = c.to_ascii_lowercase();
+        if self.live && !matches!(c, 'z' | 'y' | 'd') {
+            return;
+        }
+        match c {
             'c' => self.confirm(),
             's' if self.sel.is_some() && self.ui.kind == Kind::Snip => self.finish(Finish::SaveAs),
             't' if self.sel.is_some() && self.ui.kind == Kind::Snip => self.finish(Finish::Pin),
@@ -1805,7 +1952,7 @@ impl Overlay {
 
     fn plain_shortcut(&mut self, c: char) {
         // Z zooms in where the pointer is, Shift+Z zooms back out.
-        if c == 'z' {
+        if c == 'z' && !self.live {
             self.zoom_step(!self.mods.shift);
             return;
         }
@@ -1820,7 +1967,9 @@ impl Overlay {
             self.activate(Btn::Mode(mode));
             return;
         }
-        if self.ui.kind != Kind::Snip {
+        // Tools that need the picture underneath: a recording shows the
+        // live screen instead.
+        if self.live_tools_only() && matches!(c, 'b' | 'g' | 'u' | 'i' | 'c' | 'f') {
             return;
         }
         let tool = match c {
@@ -1937,6 +2086,9 @@ impl Overlay {
     /// Magnify by `factor`, keeping the screenshot pixel under `at`
     /// (window pixels) where it is.
     pub fn zoom_by(&mut self, factor: f32, at: Pt) {
+        if self.live {
+            return;
+        }
         let old = self.zoom;
         let mut z = (old * factor).clamp(1.0, MAX_ZOOM);
         if z < 1.02 {
@@ -1990,7 +2142,7 @@ impl Overlay {
 
     /// The topmost markup object under `p` (screenshot pixels).
     fn markup_at(&self, p: Pt) -> Option<usize> {
-        if self.ui.kind != Kind::Snip || !self.sel.as_ref().is_some_and(|s| s.rect.contains(p)) {
+        if !self.sel.as_ref().is_some_and(|s| s.rect.contains(p)) {
             return None;
         }
         let tol = self.ui_px(5.0);
@@ -2110,7 +2262,7 @@ impl Overlay {
 
     /// The pointer over markup: what a press there would do.
     fn markup_cursor(&self, inside: bool) -> Option<CursorKind> {
-        if self.ui.kind != Kind::Snip || !self.edits_markup() {
+        if !self.edits_markup() {
             return None;
         }
         if let Some(a) = self.picked_markup() {
@@ -2232,6 +2384,7 @@ impl Overlay {
     fn btn_enabled(&self, btn: Btn) -> bool {
         match btn {
             Btn::Undo => !self.undo.is_empty() || self.text_edit.is_some(),
+            Btn::Clear => !self.annotations.is_empty() || self.text_edit.is_some(),
             Btn::Redo => !self.redo.is_empty(),
             Btn::Mode(Mode::Freeform) => self.ui.kind == Kind::Snip,
             _ => true,
@@ -2262,6 +2415,12 @@ impl Overlay {
                 if k == Kind::Record {
                     // Recordings show the live screen, not an isolated window.
                     self.restore_patch();
+                    if matches!(
+                        self.tool,
+                        Tool::Pixelate | Tool::Blur | Tool::Magnify | Tool::Pipette
+                    ) {
+                        self.tool = Tool::Select;
+                    }
                 }
                 self.ui.kind = k;
                 if k == Kind::Record && self.ui.mode == Mode::Freeform {
@@ -2325,6 +2484,16 @@ impl Overlay {
                 self.restyle_markup(false);
             }
             Btn::Record => self.confirm(),
+            Btn::Done => self.confirm(),
+            Btn::Clear => {
+                self.text_edit = None;
+                if !self.annotations.is_empty() {
+                    self.checkpoint();
+                    self.annotations.clear();
+                }
+                self.picked = None;
+                self.hover_markup = None;
+            }
         }
     }
 

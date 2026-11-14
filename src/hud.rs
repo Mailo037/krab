@@ -28,6 +28,9 @@ pub enum Hud {
         saving: bool,
         /// Pointer position (device pixels) while it is over the HUD.
         pointer: Option<Pt>,
+        /// Markup can be drawn over the recording (`None`: not here), and
+        /// whether the user is drawing right now.
+        drawing: Option<bool>,
     },
     /// A scrolling capture is collecting rows.
     Scrolling {
@@ -41,6 +44,8 @@ pub enum Hud {
 /// What a click on a HUD does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HudHit {
+    /// Start or stop drawing over the recording.
+    Draw,
     Pause,
     Stop,
     Other,
@@ -56,25 +61,28 @@ impl Hud {
                 ((112.0 + text_w + 22.0).clamp(280.0, 440.0), 78.0)
             }
             Hud::Countdown { .. } => (250.0, 52.0),
-            Hud::Recording { .. } => (214.0, 46.0),
+            Hud::Recording { drawing, .. } => (if drawing.is_some() { 250.0 } else { 214.0 }, 46.0),
             Hud::Scrolling { .. } => (330.0, 46.0),
         }
     }
 
-    /// The pause and stop buttons of the recording HUD (device pixels).
-    fn recording_buttons(w: f32, h: f32, s: f32) -> (RectF, RectF) {
+    /// The draw, pause and stop buttons of the recording HUD (device pixels).
+    fn recording_buttons(w: f32, h: f32, s: f32) -> (RectF, RectF, RectF) {
         let cy = h / 2.0;
         let stop = RectF::new(w - 78.0 * s, cy - 15.0 * s, 68.0 * s, 30.0 * s);
         let pause = RectF::new(stop.x - 36.0 * s, cy - 15.0 * s, 30.0 * s, 30.0 * s);
-        (pause, stop)
+        let draw = RectF::new(pause.x - 36.0 * s, cy - 15.0 * s, 30.0 * s, 30.0 * s);
+        (draw, pause, stop)
     }
 
     /// What clicking at `p` (device pixels) on a `w` x `h` HUD does.
     pub fn hit(&self, p: Pt, w: f32, h: f32, scale: f32) -> HudHit {
         match self {
-            Hud::Recording { .. } => {
-                let (pause, _) = Self::recording_buttons(w, h, scale);
-                if pause.contains(p) {
+            Hud::Recording { drawing, .. } => {
+                let (draw, pause, _) = Self::recording_buttons(w, h, scale);
+                if drawing.is_some() && draw.contains(p) {
+                    HudHit::Draw
+                } else if pause.contains(p) {
                     HudHit::Pause
                 } else {
                     HudHit::Stop
@@ -206,6 +214,7 @@ impl Hud {
                 control,
                 saving,
                 pointer,
+                drawing,
             } => {
                 let cy = fh / 2.0;
                 if *saving {
@@ -242,8 +251,22 @@ impl Hud {
                     14.5 * s,
                     if paused { theme::TEXT_DIM } else { theme::TEXT },
                 );
-                let (pause, btn) = Self::recording_buttons(fw, fh, s);
+                let (draw, pause, btn) = Self::recording_buttons(fw, fh, s);
                 let over = |r: RectF| hovered && pointer.is_some_and(|p| r.contains(p));
+                if let Some(on) = *drawing {
+                    if on {
+                        c.fill_rrect(draw, 7.0 * s, theme::ACCENT);
+                    } else if over(draw) {
+                        c.fill_rrect(draw, 7.0 * s, theme::HOVER);
+                    }
+                    icons::draw(
+                        &mut c,
+                        icons::Icon::Pen,
+                        draw.center(),
+                        18.0 * s,
+                        Color::WHITE,
+                    );
+                }
                 if over(pause) || paused {
                     c.fill_rrect(pause, 7.0 * s, theme::HOVER);
                 }
@@ -261,7 +284,7 @@ impl Hud {
                 c.fill_rrect(
                     btn,
                     7.0 * s,
-                    if hovered && !over(pause) {
+                    if hovered && !over(pause) && !(drawing.is_some() && over(draw)) {
                         theme::DANGER
                     } else {
                         theme::HOVER
@@ -351,11 +374,19 @@ mod tests {
                 control: Arc::new(Control::new()),
                 saving: false,
                 pointer: None,
+                drawing: None,
+            },
+            Hud::Recording {
+                control: Arc::new(Control::new()),
+                saving: false,
+                pointer: None,
+                drawing: Some(true),
             },
             Hud::Recording {
                 control: Arc::new(Control::new()),
                 saving: true,
                 pointer: None,
+                drawing: Some(false),
             },
             Hud::Scrolling {
                 height: Arc::new(AtomicU32::new(2400)),
@@ -376,17 +407,31 @@ mod tests {
 
     #[test]
     fn recording_hud_tells_pause_from_stop() {
-        let hud = Hud::Recording {
-            control: Arc::new(Control::new()),
-            saving: false,
-            pointer: None,
-        };
-        let (w, h) = hud.size();
-        let (pause, stop) = Hud::recording_buttons(w, h, 1.0);
-        assert!(pause.right() < stop.x, "buttons overlap");
-        assert_eq!(hud.hit(pause.center(), w, h, 1.0), HudHit::Pause);
-        assert_eq!(hud.hit(stop.center(), w, h, 1.0), HudHit::Stop);
-        assert_eq!(hud.hit(Pt::new(10.0, 10.0), w, h, 1.0), HudHit::Stop);
+        for drawing in [None, Some(false)] {
+            let hud = Hud::Recording {
+                control: Arc::new(Control::new()),
+                saving: false,
+                pointer: None,
+                drawing,
+            };
+            let (w, h) = hud.size();
+            let (draw, pause, stop) = Hud::recording_buttons(w, h, 1.0);
+            assert!(pause.right() < stop.x, "buttons overlap");
+            if drawing.is_some() {
+                assert!(draw.right() < pause.x, "buttons overlap");
+                // The time ("59:59" ends near 90 px) keeps clear of the buttons.
+                assert!(draw.x >= 95.0, "no room for the time");
+            }
+            assert_eq!(hud.hit(pause.center(), w, h, 1.0), HudHit::Pause);
+            assert_eq!(hud.hit(stop.center(), w, h, 1.0), HudHit::Stop);
+            assert_eq!(hud.hit(Pt::new(10.0, 10.0), w, h, 1.0), HudHit::Stop);
+            let expect = if drawing.is_some() {
+                HudHit::Draw
+            } else {
+                HudHit::Stop
+            };
+            assert_eq!(hud.hit(draw.center(), w, h, 1.0), expect);
+        }
     }
 
     #[test]

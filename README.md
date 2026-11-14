@@ -94,6 +94,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Screen recording | yes, MP4 with ffmpeg (encoded on the graphics card when possible) or GIF without |
 | Sound in recordings: what the computer plays and / or the microphone | yes, MP4 only - see notes below |
 | Pause and resume a recording; mouse pointer and click highlights | yes |
+| Draw on a recording, before it starts and while it runs (the toolbars stay out of the video) | yes (Windows) |
 | Open the snip in another app | yes (system default app) |
 | Tray / menu bar icon and start with the system | yes |
 | Global shortcuts for snips and recording, changeable in the settings | yes (Linux: on X11) |

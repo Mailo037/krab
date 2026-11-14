@@ -122,7 +122,46 @@ const PROPS_BAR: &[Option<Btn>] = &[
     Some(Btn::Width(2)),
 ];
 
-const RECORD_BAR: &[Option<Btn>] = &[Some(Btn::Record), None, Some(Btn::Cancel)];
+/// Before a recording: markup to show in it, and start.
+const RECORD_BAR: &[Option<Btn>] = &[
+    Some(Btn::Tools),
+    None,
+    Some(Btn::Undo),
+    Some(Btn::Redo),
+    None,
+    Some(Btn::Record),
+    None,
+    Some(Btn::Cancel),
+];
+
+/// Drawing over a running recording.
+const LIVE_BAR: &[Option<Btn>] = &[
+    Some(Btn::Tools),
+    None,
+    Some(Btn::Undo),
+    Some(Btn::Redo),
+    Some(Btn::Clear),
+    None,
+    Some(Btn::Done),
+];
+
+/// The markup tools that need no picture underneath (for live markup).
+const LIVE_PALETTE: &[Option<Btn>] = &[
+    Some(Btn::Tool(Tool::Select)),
+    Some(Btn::Tool(Tool::Pen)),
+    Some(Btn::Tool(Tool::Highlighter)),
+    Some(Btn::Tool(Tool::Line)),
+    Some(Btn::Tool(Tool::Arrow)),
+    Some(Btn::Tool(Tool::Rect)),
+    Some(Btn::Tool(Tool::Ellipse)),
+    Some(Btn::Tool(Tool::Text)),
+    None,
+    Some(Btn::Tool(Tool::Callout)),
+    Some(Btn::Tool(Tool::Step)),
+    Some(Btn::Tool(Tool::Measure)),
+    None,
+    Some(Btn::Tool(Tool::Eraser)),
+];
 
 const SEP_W: f32 = 9.0;
 
@@ -161,6 +200,8 @@ impl Overlay {
             Btn::Frame => Icon::Frame,
             Btn::Copy => Icon::Copy,
             Btn::Record => Icon::Dot,
+            Btn::Done => Icon::Check,
+            Btn::Clear => Icon::Trash,
             // The tools button shows the tool in use.
             Btn::Tools => return self.btn_icon(Btn::Tool(self.tool)),
             Btn::More => Icon::More,
@@ -172,6 +213,7 @@ impl Overlay {
         match btn {
             Btn::Delay => Some(format!("{}s", self.ui.delay)),
             Btn::Record => Some("Start recording".into()),
+            Btn::Done => Some("Done".into()),
             _ => None,
         }
     }
@@ -211,6 +253,8 @@ impl Overlay {
             Btn::Frame => "Background frame   F".into(),
             Btn::Copy => "Copy   Enter".into(),
             Btn::Record => "Start recording   Enter".into(),
+            Btn::Done => "Stop drawing, keep the markup   Esc".into(),
+            Btn::Clear => "Remove all markup".into(),
             Btn::Tools => "Markup tools".into(),
             Btn::More => "Save, pin, text and more".into(),
             Btn::Color(i) => theme::PALETTE[i as usize].to_hex_string(),
@@ -242,9 +286,9 @@ impl Overlay {
             Btn::Width(_) => 30.0 * s,
             // Room for the small arrow next to the tool icon.
             Btn::Tools => (theme::BTN + 12.0) * s,
-            Btn::Delay | Btn::Record => {
+            Btn::Delay | Btn::Record | Btn::Done => {
                 let label = self.btn_label(btn).unwrap_or_default();
-                let pad = if btn == Btn::Record { 14.0 } else { 6.0 };
+                let pad = if btn == Btn::Delay { 6.0 } else { 14.0 };
                 theme::BTN * s + text::ui().measure(&label, theme::FONT * s) + pad * s
             }
             _ => theme::BTN * s,
@@ -299,6 +343,9 @@ impl Overlay {
         let (sw, sh) = (self.w as f32, self.h as f32);
         let btn_h = theme::BTN * s;
 
+        if self.live_idle {
+            return Bars::default();
+        }
         let Some(sel) = &self.sel else {
             if matches!(self.drag, Drag::NewRect { .. } | Drag::Lasso { .. }) {
                 return Bars::default();
@@ -315,7 +362,16 @@ impl Overlay {
         };
 
         let record = self.ui.kind == Kind::Record;
-        let items = if record { RECORD_BAR } else { TOOL_BAR };
+        let items = match (record, self.live) {
+            (_, true) => LIVE_BAR,
+            (true, _) => RECORD_BAR,
+            _ => TOOL_BAR,
+        };
+        let tools = if self.live_tools_only() {
+            LIVE_PALETTE
+        } else {
+            PALETTE
+        };
         let gap = 8.0 * s;
         let margin = 8.0 * s;
         let row_gap = 4.0 * s;
@@ -327,7 +383,7 @@ impl Overlay {
         let (pw, ph) = self.bar_size(PROPS_BAR, props_h);
         // Always reserve room for the properties bar or the tool palette so
         // the toolbar does not jump when one of them opens.
-        let reserve = if record { 0.0 } else { mh + gap * 0.75 };
+        let reserve = mh + gap * 0.75;
 
         // Zoomed in, the selection may reach past the window: the bars stay on it.
         let r = self.rect_to_screen(sel.rect);
@@ -356,13 +412,13 @@ impl Overlay {
 
         // The palette and the properties bar share the spot next to the toolbar.
         let mut palette = Vec::new();
-        if !record && self.palette {
+        if self.palette {
             let anchor = main
                 .slots
                 .iter()
                 .find(|sl| sl.btn == Btn::Tools)
                 .map_or(mx, |sl| sl.rect.x - theme::BAR_PAD * s);
-            let prows = self.split_rows(PALETTE, btn_h, sw - 2.0 * margin);
+            let prows = self.split_rows(tools, btn_h, sw - 2.0 * margin);
             let n = prows.len() as f32;
             let first_y = if props_below {
                 my + block_h + gap * 0.75
@@ -379,7 +435,7 @@ impl Overlay {
         }
         // A picked object can take a colour and size, whatever the tool.
         let styled = self.tool.has_style() || self.picked_markup().is_some_and(|a| a.has_style());
-        let props = (!record && palette.is_empty() && styled).then(|| {
+        let props = (palette.is_empty() && styled).then(|| {
             let py = if props_below {
                 my + block_h + gap * 0.75
             } else {

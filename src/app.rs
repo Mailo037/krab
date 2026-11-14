@@ -124,6 +124,22 @@ struct PinWin {
     last_click: Option<Instant>,
 }
 
+/// Markup over a running recording: a transparent window covering the
+/// recorded monitor. It lets every click through to the screen until the
+/// user starts drawing from the recording indicator.
+struct LayerWin {
+    window: Rc<Window>,
+    surface: crate::platform::LayerSurface,
+    overlay: Overlay,
+    /// What the recorder paints into every frame.
+    markup: std::sync::Arc<crate::record::LiveMarkup>,
+    cursor: CursorKind,
+    /// Something has been shown (later frames only repaint what changed).
+    presented: bool,
+    /// The window that had the keyboard before drawing started.
+    return_focus: u64,
+}
+
 struct HudWin {
     window: Rc<Window>,
     surface: Surface,
@@ -151,6 +167,8 @@ pub struct App {
     /// Short pause that lets menus and our own windows disappear first.
     settle: Option<(Instant, Request)>,
     recorder: Option<Recorder>,
+    /// Markup drawn over the running recording.
+    layer: Option<LayerWin>,
     /// Background jobs (text extraction) still running.
     busy: usize,
     /// A finished snip waiting to be copied / saved.
@@ -210,6 +228,7 @@ pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
         delay: None,
         settle: None,
         recorder: None,
+        layer: None,
         busy: 0,
         pending: None,
         last_monitor: None,
@@ -348,6 +367,40 @@ fn draw_overlay(win: &mut OverlayWin) {
     if !win.presented {
         win.presented = true;
         trace::mark("overlay on screen");
+    }
+}
+
+fn draw_layer(layer: &mut LayerWin) {
+    let (w, h) = layer.surface.size();
+    let incremental = layer.presented;
+    let damage = layer
+        .overlay
+        .render_frame(layer.surface.pixels(), w, h, incremental);
+    let dirty = match damage {
+        Some(rects) => match rects.into_iter().reduce(|a, b| a.union(&b)) {
+            Some(r) => Some(r),
+            None => return,
+        },
+        None => None,
+    };
+    if layer.surface.present(dirty) {
+        layer.presented = true;
+    }
+}
+
+/// The overlay key for a key press, if it has one.
+fn overlay_key(key: &WinitKey) -> Option<overlay::Key> {
+    match key {
+        WinitKey::Named(NamedKey::Escape) => Some(overlay::Key::Escape),
+        WinitKey::Named(NamedKey::Enter) => Some(overlay::Key::Enter),
+        WinitKey::Named(NamedKey::Backspace) => Some(overlay::Key::Backspace),
+        WinitKey::Named(NamedKey::Delete) => Some(overlay::Key::Delete),
+        WinitKey::Named(NamedKey::ArrowLeft) => Some(overlay::Key::Left),
+        WinitKey::Named(NamedKey::ArrowRight) => Some(overlay::Key::Right),
+        WinitKey::Named(NamedKey::ArrowUp) => Some(overlay::Key::Up),
+        WinitKey::Named(NamedKey::ArrowDown) => Some(overlay::Key::Down),
+        WinitKey::Character(s) => s.chars().next().map(overlay::Key::Char),
+        _ => None,
     }
 }
 
@@ -734,18 +787,19 @@ impl App {
                 self.begin_delay(el, secs, req);
             }
             Outcome::Record(rect) => {
-                let Some((index, native, monitor)) = self.session.as_ref().map(|s| {
+                let Some((index, native, monitor, markup)) = self.session.as_ref().map(|s| {
                     (
                         s.wins[idx].index,
                         s.wins[idx].native,
                         s.wins[idx].monitor.clone(),
+                        s.wins[idx].overlay.live_markup(),
                     )
                 }) else {
                     return;
                 };
                 self.close_session();
                 self.last_monitor = monitor;
-                self.start_recording(el, index, native, rect);
+                self.start_recording(el, index, native, rect, markup);
             }
         }
     }
@@ -1012,7 +1066,16 @@ impl App {
 
     // ---- recording ---------------------------------------------------------
 
-    fn start_recording(&mut self, el: &ActiveEventLoop, index: usize, native: RectI, rect: RectI) {
+    /// Record `rect` on the monitor at `native`, showing `markup` (drawn
+    /// before the recording began) from the first frame.
+    fn start_recording(
+        &mut self,
+        el: &ActiveEventLoop,
+        index: usize,
+        native: RectI,
+        rect: RectI,
+        markup: Vec<crate::annotate::Annotation>,
+    ) {
         let proxy = self.proxy.clone();
         let settings = crate::record::Settings {
             fps: self.cfg.record_fps,
@@ -1021,6 +1084,26 @@ impl App {
             clicks: self.cfg.record_clicks,
             audio: crate::audio::Source::parse(&self.cfg.record_audio),
             encoder: self.cfg.record_encoder.clone(),
+            markup: None,
+        };
+        // Before the indicator, so the indicator stays on top of it.
+        self.layer = self.open_layer(el, native, rect, markup.clone());
+        let fixed = || {
+            // No layer here: the markup drawn beforehand still shows.
+            let scale = self
+                .last_monitor
+                .as_ref()
+                .map_or(1.0, |m| m.scale_factor() as f32);
+            let m = crate::record::LiveMarkup::new(scale);
+            m.set(markup);
+            std::sync::Arc::new(m)
+        };
+        let settings = crate::record::Settings {
+            markup: Some(match &self.layer {
+                Some(l) => l.markup.clone(),
+                None => fixed(),
+            }),
+            ..settings
         };
         let recorder = Recorder::start(index, native, rect, settings, move |result| {
             let _ = proxy.send_event(UserEvent::RecordingDone(result));
@@ -1033,10 +1116,189 @@ impl App {
                 control,
                 saving: false,
                 pointer: None,
+                drawing: self.layer.as_ref().map(|_| false),
             },
             Anchor::TopCenter,
             None,
         );
+    }
+
+    /// The transparent window for markup over a recording of `region` on the
+    /// monitor at `native` (`None` where the platform cannot show one).
+    fn open_layer(
+        &mut self,
+        el: &ActiveEventLoop,
+        native: RectI,
+        region: RectI,
+        markup: Vec<crate::annotate::Annotation>,
+    ) -> Option<LayerWin> {
+        let (w, h) = (native.w.max(1) as u32, native.h.max(1) as u32);
+        #[cfg_attr(not(windows), allow(unused_mut))]
+        let mut attrs = Window::default_attributes()
+            .with_title("Krab")
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_active(false)
+            .with_visible(false)
+            .with_inner_size(PhysicalSize::new(w, h))
+            .with_position(PhysicalPosition::new(native.x, native.y));
+        #[cfg(windows)]
+        {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs = attrs.with_skip_taskbar(true).with_drag_and_drop(false);
+        }
+        let window = el.create_window(attrs).ok()?;
+        crate::platform::suppress_caption_paint(&window);
+        // Recordings paint the markup themselves, without the toolbars.
+        window.set_content_protected(true);
+        crate::platform::cloak(&window, true);
+        window.set_visible(true);
+        let Some(surface) = crate::platform::LayerSurface::new(&window, (native.x, native.y), w, h)
+        else {
+            window.set_visible(false);
+            return None;
+        };
+        let scale = self
+            .last_monitor
+            .as_ref()
+            .map_or(1.0, |m| m.scale_factor() as f32);
+        let mut overlay = Overlay::live(w, h, scale, region, self.cfg.annotation_color());
+        overlay.set_markup(markup.clone());
+        let live = crate::record::LiveMarkup::new(scale);
+        live.set(markup);
+        let mut layer = LayerWin {
+            window: Rc::new(window),
+            surface,
+            overlay,
+            markup: std::sync::Arc::new(live),
+            cursor: CursorKind::Default,
+            presented: false,
+            return_focus: 0,
+        };
+        draw_layer(&mut layer);
+        crate::platform::cloak(&layer.window, false);
+        Some(layer)
+    }
+
+    /// Start or stop drawing over the recording.
+    fn set_drawing(&mut self, on: bool) {
+        let Some(layer) = self.layer.as_mut() else {
+            return;
+        };
+        if layer.overlay.is_drawing() == on {
+            return;
+        }
+        layer.overlay.set_drawing(on);
+        if on {
+            layer.return_focus = crate::platform::active_window();
+            layer.surface.set_click_through(false);
+            layer.window.focus_window();
+        } else {
+            layer.surface.set_click_through(true);
+            crate::platform::activate_window(std::mem::take(&mut layer.return_focus));
+        }
+        layer.markup.set(layer.overlay.markup());
+        draw_layer(layer);
+        for win in &mut self.huds {
+            if let Hud::Recording {
+                drawing: Some(d), ..
+            } = &mut win.hud
+            {
+                *d = on;
+                // Keep the indicator clickable above the layer.
+                crate::platform::bring_to_top(&win.window);
+                win.window.request_redraw();
+            }
+        }
+    }
+
+    fn close_layer(&mut self) {
+        if let Some(mut layer) = self.layer.take() {
+            if layer.overlay.is_drawing() {
+                crate::platform::activate_window(std::mem::take(&mut layer.return_focus));
+            }
+            layer.window.set_visible(false);
+        }
+    }
+
+    fn layer_event(&mut self, event: WindowEvent) {
+        let Some(layer) = self.layer.as_mut() else {
+            return;
+        };
+        if matches!(event, WindowEvent::RedrawRequested) {
+            draw_layer(layer);
+            return;
+        }
+        if let WindowEvent::ModifiersChanged(m) = &event {
+            let st = m.state();
+            self.mods = Mods {
+                shift: st.shift_key(),
+                ctrl: st.control_key() || st.super_key(),
+                alt: st.alt_key(),
+            };
+            layer.overlay.set_mods(self.mods);
+            return;
+        }
+        // Only showing the markup: input is not for us.
+        if !layer.overlay.is_drawing() {
+            return;
+        }
+        let ov = &mut layer.overlay;
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                ov.pointer_moved(position.x as f32, position.y as f32);
+            }
+            WindowEvent::CursorLeft { .. } => ov.pointer_left(),
+            WindowEvent::MouseInput { state, button, .. } => {
+                let button = match button {
+                    MouseButton::Left => Button::Left,
+                    MouseButton::Right => Button::Right,
+                    _ => return,
+                };
+                if let (Some((sx, sy)), Ok(origin)) = (
+                    crate::platform::message_cursor_pos(),
+                    layer.window.inner_position(),
+                ) {
+                    ov.pointer_moved((sx - origin.x) as f32, (sy - origin.y) as f32);
+                }
+                ov.pointer_button(button, state == ElementState::Pressed);
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                ov.scroll(dy);
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let key = overlay_key(&event.logical_key);
+                let control_key = matches!(
+                    key,
+                    Some(overlay::Key::Escape | overlay::Key::Enter | overlay::Key::Backspace)
+                );
+                if ov.is_typing() && !self.mods.ctrl && !control_key {
+                    if let Some(text) = &event.text {
+                        ov.text_input(text);
+                    }
+                } else if let Some(key) = key {
+                    ov.key(key);
+                }
+            }
+            _ => return,
+        }
+        layer.markup.set(ov.markup());
+        let kind = ov.cursor_kind();
+        if kind != layer.cursor {
+            layer.cursor = kind;
+            layer.window.set_cursor(cursor_icon(kind));
+        }
+        if ov.take_dirty() {
+            draw_layer(layer);
+        }
+        if matches!(layer.overlay.take_outcome(), Some(Outcome::Cancel)) {
+            self.set_drawing(false);
+        }
     }
 
     fn start_scrolling(&mut self, el: &ActiveEventLoop, index: usize, native: RectI, rect: RectI) {
@@ -1212,6 +1474,7 @@ impl App {
         if let Some(rec) = &self.recorder {
             rec.stop();
         }
+        self.close_layer();
         for win in &mut self.huds {
             if let Hud::Recording { saving, .. } = &mut win.hud {
                 *saving = true;
@@ -1330,18 +1593,7 @@ impl App {
                 self.alt_tap = false;
                 target = key_target;
                 let ov = &mut session.wins[target].overlay;
-                let key = match &event.logical_key {
-                    WinitKey::Named(NamedKey::Escape) => Some(overlay::Key::Escape),
-                    WinitKey::Named(NamedKey::Enter) => Some(overlay::Key::Enter),
-                    WinitKey::Named(NamedKey::Backspace) => Some(overlay::Key::Backspace),
-                    WinitKey::Named(NamedKey::Delete) => Some(overlay::Key::Delete),
-                    WinitKey::Named(NamedKey::ArrowLeft) => Some(overlay::Key::Left),
-                    WinitKey::Named(NamedKey::ArrowRight) => Some(overlay::Key::Right),
-                    WinitKey::Named(NamedKey::ArrowUp) => Some(overlay::Key::Up),
-                    WinitKey::Named(NamedKey::ArrowDown) => Some(overlay::Key::Down),
-                    WinitKey::Character(s) => s.chars().next().map(overlay::Key::Char),
-                    _ => None,
-                };
+                let key = overlay_key(&event.logical_key);
                 let control_key = matches!(
                     key,
                     Some(overlay::Key::Escape | overlay::Key::Enter | overlay::Key::Backspace)
@@ -1406,6 +1658,7 @@ impl App {
                     saving,
                     pointer,
                     control,
+                    ..
                 } => {
                     let size = win.window.inner_size();
                     let hit = pointer.map(|p| {
@@ -1413,6 +1666,9 @@ impl App {
                             .hit(p, size.width as f32, size.height as f32, win.scale)
                     });
                     if *saving {
+                    } else if hit == Some(crate::hud::HudHit::Draw) {
+                        let on = self.layer.as_ref().is_some_and(|l| !l.overlay.is_drawing());
+                        self.set_drawing(on);
                     } else if hit == Some(crate::hud::HudHit::Pause) {
                         control.toggle_pause();
                         win.window.request_redraw();
@@ -1460,6 +1716,12 @@ impl App {
                 }
             }
         }
+        if let Some(layer) = self.layer.as_mut() {
+            layer.overlay.tick();
+            if layer.overlay.take_dirty() {
+                draw_layer(layer);
+            }
+        }
     }
 
     fn next_wakeup(&self) -> Option<Instant> {
@@ -1497,6 +1759,9 @@ impl App {
                     consider(t);
                 }
             }
+        }
+        if let Some(t) = self.layer.as_ref().and_then(|l| l.overlay.next_wakeup()) {
+            consider(t);
         }
         next
     }
@@ -2079,6 +2344,7 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Menu(id) => self.menu(el, &id),
             UserEvent::RecordingDone(result) => {
                 self.recorder = None;
+                self.close_layer();
                 self.huds
                     .retain(|h| !matches!(h.hud, Hud::Recording { .. }));
                 match result {
@@ -2164,6 +2430,8 @@ impl ApplicationHandler<UserEvent> for App {
             .and_then(|s| s.wins.iter().position(|w| w.window.id() == id))
         {
             self.overlay_event(el, idx, event);
+        } else if self.layer.as_ref().is_some_and(|l| l.window.id() == id) {
+            self.layer_event(event);
         } else if let Some(idx) = self.huds.iter().position(|h| h.window.id() == id) {
             self.hud_event(idx, event);
         } else if self.settings.as_ref().is_some_and(|s| s.window.id() == id) {

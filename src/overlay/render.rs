@@ -367,7 +367,12 @@ impl Overlay {
                 if a < b {
                     let n = (b - a) as usize;
                     let (da, sa) = (d + (a - x0) as usize, s + a as usize);
-                    dim_row(&mut dst[da..da + n], &self.px[sa..sa + n]);
+                    if self.live {
+                        // Nothing to dim on a transparent layer.
+                        dst[da..da + n].fill(0);
+                    } else {
+                        dim_row(&mut dst[da..da + n], &self.px[sa..sa + n]);
+                    }
                 }
             };
             match f.bright {
@@ -543,6 +548,9 @@ impl Overlay {
     /// Selection outlines, toolbars, loupe, labels and menus: everything
     /// drawn on top of the screenshot, at its normal size even while zoomed.
     fn draw_chrome(&self, c: &mut Canvas, f: &FrameInfo) {
+        if self.live_idle {
+            return;
+        }
         let s = self.scale;
         let bars = &f.bars;
         let (sel_rect, dragging_rect) = (f.sel_rect, f.dragging_rect);
@@ -573,7 +581,9 @@ impl Overlay {
                     c.fill_circle(hp, 3.0 * s, Color::WHITE);
                 }
             }
-            self.draw_size_label(c, rf, (r.w, r.h), bars.above);
+            if !self.live {
+                self.draw_size_label(c, rf, (r.w, r.h), bars.above);
+            }
         }
         if let Drag::Lasso { pts } = &self.drag {
             self.draw_lasso(c, pts, false);
@@ -590,7 +600,7 @@ impl Overlay {
     /// The picked object's frame and handles, and an outline on the object
     /// the select tool would pick.
     fn draw_markup_chrome(&self, c: &mut Canvas, idle: bool) {
-        if self.sel.is_none() || self.ui.kind != Kind::Snip {
+        if self.sel.is_none() {
             return;
         }
         let s = self.scale;
@@ -973,7 +983,7 @@ impl Overlay {
             _ => {}
         }
 
-        let primary = matches!(btn, Btn::Copy | Btn::Record);
+        let primary = matches!(btn, Btn::Copy | Btn::Record | Btn::Done);
         let fill = if primary {
             let base = if btn == Btn::Record {
                 theme::DANGER

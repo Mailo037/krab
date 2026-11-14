@@ -541,6 +541,7 @@ fn scene_huds(snip: &krab::output::Image) -> (Vec<u32>, u32, u32) {
         )),
         saving: false,
         pointer: None,
+        drawing: Some(false),
     };
     // Lay the three surfaces out as one centred row.
     let gap = 80.0;

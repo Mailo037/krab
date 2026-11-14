@@ -1970,3 +1970,97 @@ fn the_magnifier_shows_what_lies_under_it_bigger() {
     o.activate(Btn::Width(2));
     assert!(matches!(o.annotations[0].shape, Shape::Magnify { zoom, .. } if zoom == 3.0));
 }
+
+// ---- live markup over a recording -------------------------------------------
+
+fn live() -> Overlay {
+    let mut o = Overlay::live(W, H, 1.0, RectI::new(100, 100, 400, 300), theme::PALETTE[0]);
+    o.set_drawing(true);
+    o
+}
+
+fn render_live(o: &mut Overlay) -> Vec<u32> {
+    let mut buf = vec![0xDEAD_BEEFu32; (W * H) as usize];
+    o.render(&mut buf, W, H);
+    buf
+}
+
+#[test]
+fn live_layer_is_transparent_except_for_markup_and_tools() {
+    let mut o = live();
+    let buf = render_live(&mut o);
+    // Outside the recorded area: nothing at all (clicks go through there).
+    assert_eq!(buf[(30 * W + 30) as usize], 0);
+    assert_eq!(buf[(780 * W + 30) as usize], 0);
+    // Inside: an all but invisible tint that catches the pointer.
+    assert_eq!(buf[(250 * W + 300) as usize], 0x0100_0000);
+    // The toolbar sits below the area.
+    assert!((410..H).any(|y| buf[(y * W + 450) as usize] >> 24 == 0xFF));
+
+    drag(&mut o, (150.0, 150.0), (300.0, 250.0));
+    assert_eq!(o.markup().len(), 1, "the stroke is markup");
+    let buf = render_live(&mut o);
+    assert!((140..260).any(|y| (140..310).any(|x| buf[(y * W + x) as usize] >> 24 > 0x80)));
+
+    // Only showing it: no tools, no tint, the markup stays.
+    o.set_drawing(false);
+    let buf = render_live(&mut o);
+    assert_eq!(buf[(250 * W + 450) as usize], 0);
+    assert!(
+        (410..H).all(|y| buf[(y * W + 450) as usize] == 0),
+        "toolbar gone"
+    );
+    assert!((140..260).any(|y| (140..310).any(|x| buf[(y * W + x) as usize] >> 24 > 0x80)));
+    assert_eq!(o.markup().len(), 1);
+}
+
+#[test]
+fn live_layer_keeps_the_area_and_escape_ends_drawing() {
+    let mut o = live();
+    // A press outside the recorded area neither draws nor moves the area.
+    drag(&mut o, (700.0, 600.0), (800.0, 700.0));
+    assert!(o.markup().is_empty());
+    assert_eq!(o.selection(), Some(RectI::new(100, 100, 400, 300)));
+    assert!(o.take_outcome().is_none());
+    // Tools that need the picture underneath are not offered.
+    o.key(Key::Char('b'));
+    assert_eq!(o.tool(), Tool::Pen);
+    o.key(Key::Escape);
+    assert!(matches!(o.take_outcome(), Some(Outcome::Cancel)));
+    assert_eq!(o.selection(), Some(RectI::new(100, 100, 400, 300)));
+}
+
+#[test]
+fn live_markup_includes_text_while_it_is_typed() {
+    let mut o = live();
+    o.key(Key::Char('t'));
+    click(&mut o, (200.0, 200.0));
+    o.text_input("Hi");
+    let m = o.markup();
+    assert_eq!(m.len(), 1);
+    assert!(matches!(&m[0].shape, Shape::Text { text, .. } if text == "Hi"));
+    o.activate(Btn::Clear);
+    assert!(o.markup().is_empty());
+}
+
+#[test]
+fn markup_drawn_before_a_recording_goes_with_it() {
+    let mut o = overlay(Mode::Rect);
+    o.activate(Btn::Kind(Kind::Record));
+    drag(&mut o, (100.0, 100.0), (500.0, 400.0));
+    assert_eq!(o.selection(), Some(RectI::new(100, 100, 400, 300)));
+    // The pen draws instead of moving the area.
+    o.activate(Btn::Tools);
+    o.activate(Btn::Tool(Tool::Pen));
+    drag(&mut o, (150.0, 150.0), (300.0, 250.0));
+    assert_eq!(o.selection(), Some(RectI::new(100, 100, 400, 300)));
+    assert_eq!(o.live_markup().len(), 1);
+    // Tools that need the frozen picture are not offered.
+    o.key(Key::Char('b'));
+    assert_eq!(o.tool(), Tool::Pen);
+    o.key(Key::Enter);
+    assert!(matches!(
+        o.take_outcome(),
+        Some(Outcome::Record(r)) if r == RectI::new(100, 100, 400, 300)
+    ));
+}

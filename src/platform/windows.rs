@@ -821,3 +821,161 @@ pub fn scroll_wheel_at(at: (i32, i32), notches: i32) -> bool {
         SendInput(1, &input, size_of::<INPUT>() as i32) == 1
     }
 }
+
+/// A window painted with per-pixel transparency (a layered window) from a
+/// buffer of premultiplied `0xAARRGGBB` pixels: the markup drawn over a
+/// running recording. It lets clicks through to the windows below until
+/// [`LayerSurface::set_click_through`] says otherwise.
+pub struct LayerSurface {
+    hwnd: HWND,
+    blit: Blitter,
+    /// Top-left corner on the desktop.
+    origin: (i32, i32),
+    click_through: bool,
+}
+
+impl LayerSurface {
+    /// Turn `window` (already shown, `w` x `h` pixels at `origin`) into a
+    /// layered window. Nothing shows until the first [`present`](Self::present).
+    pub fn new(
+        window: &winit::window::Window,
+        origin: (i32, i32),
+        w: u32,
+        h: u32,
+    ) -> Option<LayerSurface> {
+        use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = window.window_handle().ok()?;
+        let RawWindowHandle::Win32(h32) = handle.as_raw() else {
+            return None;
+        };
+        let blit = Blitter::new(w as i32, h as i32).ok()?;
+        let layer = LayerSurface {
+            hwnd: h32.hwnd.get() as HWND,
+            blit,
+            origin,
+            click_through: true,
+        };
+        layer.apply_style();
+        Some(layer)
+    }
+
+    fn apply_style(&self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowLongW, WS_EX_LAYERED};
+        unsafe {
+            let mut ex = GetWindowLongW(self.hwnd, GWL_EXSTYLE) as u32;
+            ex |= WS_EX_LAYERED | WS_EX_TOOLWINDOW;
+            if self.click_through {
+                ex |= WS_EX_TRANSPARENT;
+            } else {
+                ex &= !WS_EX_TRANSPARENT;
+            }
+            SetWindowLongW(self.hwnd, GWL_EXSTYLE, ex as i32);
+        }
+    }
+
+    /// Let mouse input pass through to the windows below, or take it.
+    pub fn set_click_through(&mut self, on: bool) {
+        if self.click_through != on {
+            self.click_through = on;
+            self.apply_style();
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.blit.w as u32, self.blit.h as u32)
+    }
+
+    /// The pixels shown by the next [`present`](Self::present); they keep
+    /// what was presented last.
+    pub fn pixels(&mut self) -> &mut [u32] {
+        let n = (self.blit.w * self.blit.h) as usize;
+        unsafe { std::slice::from_raw_parts_mut(self.blit.bits as *mut u32, n) }
+    }
+
+    /// Show the pixels; only `dirty` changed since the last call, if given.
+    pub fn present(&mut self, dirty: Option<RectI>) -> bool {
+        use windows_sys::Win32::Foundation::SIZE;
+        use windows_sys::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            UpdateLayeredWindowIndirect, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+        };
+        let pos = POINT {
+            x: self.origin.0,
+            y: self.origin.1,
+        };
+        let size = SIZE {
+            cx: self.blit.w,
+            cy: self.blit.h,
+        };
+        let src = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: AC_SRC_OVER as u8,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        let rect = dirty.map(|r| RECT {
+            left: r.x,
+            top: r.y,
+            right: r.right(),
+            bottom: r.bottom(),
+        });
+        let info = UPDATELAYEREDWINDOWINFO {
+            cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+            hdcDst: null_mut(),
+            pptDst: &pos,
+            psize: &size,
+            hdcSrc: self.blit.mem,
+            pptSrc: &src,
+            crKey: 0,
+            pblend: &blend,
+            dwFlags: ULW_ALPHA,
+            prcDirty: rect.as_ref().map_or(null(), |r| r as *const RECT),
+        };
+        unsafe {
+            GdiFlush();
+            UpdateLayeredWindowIndirect(self.hwnd, &info) != 0
+        }
+    }
+}
+
+/// The window that has the keyboard now.
+pub fn active_window() -> u64 {
+    unsafe { GetForegroundWindow() as u64 }
+}
+
+/// Give the keyboard back to a window found with [`active_window`].
+pub fn activate_window(id: u64) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+    if id != 0 {
+        unsafe {
+            SetForegroundWindow(id as HWND);
+        }
+    }
+}
+
+/// Put an always-on-top `window` above the other always-on-top windows
+/// without giving it the keyboard.
+pub fn bring_to_top(window: &winit::window::Window) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(h) = handle.as_raw() else {
+        return;
+    };
+    unsafe {
+        SetWindowPos(
+            h.hwnd.get() as HWND,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+}
