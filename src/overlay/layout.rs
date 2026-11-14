@@ -96,6 +96,7 @@ const PALETTE: &[Option<Btn>] = &[
     None,
     Some(Btn::Tool(Tool::Pixelate)),
     Some(Btn::Tool(Tool::Blur)),
+    Some(Btn::Tool(Tool::Magnify)),
     Some(Btn::Tool(Tool::Eraser)),
     Some(Btn::Tool(Tool::Pipette)),
 ];
@@ -149,6 +150,7 @@ impl Overlay {
                 Tool::Step => Icon::Step,
                 Tool::Measure => Icon::Ruler,
                 Tool::Blur => Icon::Blur,
+                Tool::Magnify => Icon::ZoomIn,
                 Tool::Pixelate => Icon::Pixelate,
                 Tool::Eraser => Icon::Eraser,
                 Tool::Pipette => Icon::Pipette,
@@ -197,6 +199,7 @@ impl Overlay {
                 Tool::Step => "Step number   N",
                 Tool::Measure => "Measure   M",
                 Tool::Blur => "Blur   G",
+                Tool::Magnify => "Magnifier   U",
                 Tool::Pixelate => "Pixelate   B",
                 Tool::Eraser => "Eraser   X",
                 Tool::Pipette => "Color picker   I",
@@ -211,6 +214,12 @@ impl Overlay {
             Btn::Tools => "Markup tools".into(),
             Btn::More => "Save, pin, text and more".into(),
             Btn::Color(i) => theme::PALETTE[i as usize].to_hex_string(),
+            Btn::Width(i) if self.tool == Tool::Magnify => [
+                "1.5 \u{00D7} bigger",
+                "2 \u{00D7} bigger",
+                "3 \u{00D7} bigger",
+            ][i as usize]
+                .into(),
             Btn::Width(i) => ["Small", "Medium", "Large"][i as usize].into(),
         }
     }

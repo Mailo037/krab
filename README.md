@@ -75,6 +75,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Step numbers (1, 2, 3...) for instructions | yes |
 | Measuring: distances in pixels, with width and height | yes |
 | Pixelate and blur | yes |
+| Magnifier: a round lens that shows a spot 1.5, 2 or 3 times bigger | yes |
 | Hide personal data: e-mail addresses, phone, card and IBAN numbers, IP addresses and API keys are found and covered | yes - uses text extraction |
 | Background frame: padding, rounded corners and a shadow on a gradient | yes |
 | Colour picker with pixel loupe (copies HEX, RGB or HSL) | yes |
@@ -244,7 +245,7 @@ krab --text               # select a paragraph, its text is on the clipboard
 | `Ctrl+Z` / `Ctrl+Y` | undo / redo (markup, moving and resizing) |
 | `Ctrl+A` | select the whole screen |
 | `V` `P` `H` `L` `A` `R` `E` `T` `B` `X` `I` | move, pen, highlighter, line, arrow, rectangle, ellipse, text, pixelate, eraser, colour picker |
-| `K` `N` `M` `G` | callout, step number, measure, blur |
+| `K` `N` `M` `G` `U` | callout, step number, measure, blur, magnifier |
 | `F` | background frame on / off |
 | `Ctrl+T` | pin to the screen |
 | arrow keys (`Shift` = 10 px, `Ctrl` = resize) | nudge the selection, or the picked markup |

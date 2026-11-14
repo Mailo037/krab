@@ -963,6 +963,16 @@ impl Overlay {
         }
     }
 
+    /// How much bigger a new magnifier shows things.
+    fn magnify_zoom(&self) -> f32 {
+        crate::annotate::MAGNIFY_ZOOM[self.width_idx]
+    }
+
+    /// The ring around a magnifier.
+    fn lens_ring(&self) -> f32 {
+        3.0 * self.scale
+    }
+
     /// The radius of a new step marker.
     fn step_radius(&self) -> f32 {
         (9.0 + theme::WIDTHS[self.width_idx] * 1.6) * self.scale
@@ -1335,6 +1345,7 @@ impl Overlay {
             | Tool::Ellipse
             | Tool::Pixelate
             | Tool::Blur
+            | Tool::Magnify
             | Tool::Measure
             | Tool::Callout => {
                 self.drag = Drag::Draw { start: p };
@@ -1437,7 +1448,8 @@ impl Overlay {
                         | Shape::Ellipse(r)
                         | Shape::Pixelate(r)
                         | Shape::Blur(r)
-                        | Shape::Fill(r) => r.w >= 3.0 && r.h >= 3.0,
+                        | Shape::Fill(r)
+                        | Shape::Magnify { r, .. } => r.w >= 3.0 && r.h >= 3.0,
                         Shape::Text { .. } | Shape::Step { .. } | Shape::Callout { .. } => true,
                     };
                     if keep {
@@ -1528,6 +1540,29 @@ impl Overlay {
                     shape: Shape::Blur(square(start, p)),
                     color,
                     width,
+                })
+            }
+            Tool::Magnify => {
+                // Round unless Shift is held: then any oval.
+                let r = if shift {
+                    RectF::from_points(start, p)
+                } else {
+                    let side = (p.x - start.x).abs().max((p.y - start.y).abs());
+                    RectF::from_points(
+                        start,
+                        Pt::new(
+                            start.x + side * (p.x - start.x).signum(),
+                            start.y + side * (p.y - start.y).signum(),
+                        ),
+                    )
+                };
+                self.draft = Some(Annotation {
+                    shape: Shape::Magnify {
+                        r,
+                        zoom: self.magnify_zoom(),
+                    },
+                    color,
+                    width: self.lens_ring(),
                 })
             }
             Tool::Measure => {
@@ -1799,6 +1834,7 @@ impl Overlay {
             't' => Tool::Text,
             'b' => Tool::Pixelate,
             'g' => Tool::Blur,
+            'u' => Tool::Magnify,
             'k' => Tool::Callout,
             'n' => Tool::Step,
             'm' => Tool::Measure,
@@ -2146,11 +2182,12 @@ impl Overlay {
         if !self.picked_markup().is_some_and(|a| a.has_style()) {
             return;
         }
-        let (c, sw, em, r) = (
+        let (c, sw, em, r, zoom) = (
             self.color,
             self.stroke_width(),
             self.text_em(),
             self.step_radius(),
+            self.magnify_zoom(),
         );
         let scale = self.scale;
         self.edit_markup(|list, i| {
@@ -2161,6 +2198,7 @@ impl Overlay {
                 match &mut a.shape {
                     Shape::Text { size, .. } | Shape::Callout { size, .. } => *size = em,
                     Shape::Step { r: radius, .. } => *radius = r,
+                    Shape::Magnify { zoom: z, .. } => *z = zoom,
                     Shape::Measure { .. } => a.width = (sw * 0.5).max(1.5 * scale),
                     _ => a.width = sw,
                 }

@@ -1928,6 +1928,8 @@ fn preview_markup_editing() {
     o.key(Key::Enter);
     o.activate(Btn::Tool(Tool::Blur));
     drag(&mut o, (520.0, 260.0), (820.0, 380.0));
+    o.activate(Btn::Tool(Tool::Magnify));
+    drag(&mut o, (180.0, 420.0), (330.0, 570.0));
     o.activate(Btn::Tool(Tool::Select));
     o.pointer_moved(300.0, 268.0);
     shoot(&mut o, "picked");
@@ -1937,4 +1939,34 @@ fn preview_markup_editing() {
     o.zoom_by(3.0, Pt::new(560.0, 280.0));
     o.pointer_moved(700.0, 500.0);
     shoot(&mut o, "zoom");
+}
+
+#[test]
+fn the_magnifier_shows_what_lies_under_it_bigger() {
+    let mut o = overlay(Mode::Rect);
+    drag(&mut o, (100.0, 100.0), (700.0, 600.0));
+    o.key(Key::Char('u'));
+    assert_eq!(o.tool(), Tool::Magnify);
+    // Dragged wider than tall, it still comes out round.
+    drag(&mut o, (350.0, 250.0), (450.0, 320.0));
+    match o.annotations[0].shape {
+        Shape::Magnify { r, zoom } => {
+            assert_eq!(r, RectF::new(350.0, 250.0, 100.0, 100.0));
+            assert_eq!(zoom, 2.0);
+        }
+        ref s => panic!("expected a magnifier, got {s:?}"),
+    }
+    assert_eq!(o.picked, Some(0), "it stays picked like other shapes");
+
+    // 20 px right of the middle shows what lies 10 px right of it.
+    let img = o.compose().unwrap();
+    let [_, g, b, _] = pixel(&img, 320, 200);
+    assert!((g as i32 - (410 & 0xFF)).abs() <= 1, "green {g}");
+    assert_eq!(b, (300 & 0xFF) as u8);
+    // Outside the lens nothing changed.
+    assert_eq!(pixel(&img, 100, 100), [0, 200, 200, 255]);
+
+    // The size buttons set how much bigger.
+    o.activate(Btn::Width(2));
+    assert!(matches!(o.annotations[0].shape, Shape::Magnify { zoom, .. } if zoom == 3.0));
 }

@@ -22,6 +22,8 @@ pub enum Tool {
     Measure,
     Pixelate,
     Blur,
+    /// A round lens that shows what lies under it bigger.
+    Magnify,
     Eraser,
     Pipette,
 }
@@ -41,6 +43,7 @@ impl Tool {
                 | Tool::Callout
                 | Tool::Step
                 | Tool::Measure
+                | Tool::Magnify
         )
     }
 }
@@ -87,7 +90,16 @@ pub enum Shape {
     },
     /// A solid box (used to redact).
     Fill(RectF),
+    /// A lens filling the ellipse in `r` that shows what lies under its
+    /// middle `zoom` times bigger.
+    Magnify {
+        r: RectF,
+        zoom: f32,
+    },
 }
+
+/// How much bigger the magnifier shows things, by size setting.
+pub const MAGNIFY_ZOOM: [f32; 3] = [1.5, 2.0, 3.0];
 
 /// Text colour that reads well on `bg`.
 fn ink_on(bg: Color) -> Color {
@@ -332,6 +344,18 @@ impl Annotation {
                 );
             }
             Shape::Fill(r) => c.fill_rect(*r, self.color),
+            Shape::Magnify { r, zoom } => {
+                c.magnify(src.px, src.w, src.h, *r, *zoom);
+                if let Some(rect) = Rect::from_xywh(r.x, r.y, r.w.max(0.1), r.h.max(0.1)) {
+                    let mut pb = PathBuilder::new();
+                    pb.push_oval(rect);
+                    if let Some(p) = pb.finish() {
+                        // A faint dark edge keeps the ring visible on any colour.
+                        c.stroke_path(&p, self.width + 2.0 * scale, Color::rgba(0, 0, 0, 70));
+                        c.stroke_path(&p, self.width, self.color);
+                    }
+                }
+            }
             Shape::Step { at, n, r } => {
                 c.fill_circle(*at, *r, self.color);
                 c.stroke_circle(
@@ -427,6 +451,7 @@ impl Annotation {
             Shape::Line { a, b, .. } => RectF::from_points(*a, *b).inflate(self.width * 2.0),
             Shape::Rect(r) | Shape::Ellipse(r) => r.inflate(self.width / 2.0),
             Shape::Pixelate(r) | Shape::Blur(r) | Shape::Fill(r) => *r,
+            Shape::Magnify { r, .. } => r.inflate(self.width / 2.0 + 2.0),
             Shape::Step { at, r, .. } => {
                 RectF::new(at.x - r, at.y - r, 2.0 * r, 2.0 * r).inflate(1.0)
             }
@@ -470,6 +495,7 @@ impl Annotation {
             Shape::Callout {
                 pos, text, size, ..
             } => callout_box(*pos, text, *size),
+            Shape::Magnify { r, .. } => *r,
         }
     }
 
@@ -534,6 +560,10 @@ impl Annotation {
                 r.x += dx;
                 r.y += dy;
             }
+            Shape::Magnify { r, .. } => {
+                r.x += dx;
+                r.y += dy;
+            }
             Shape::Text { pos, .. } => shift(pos, dx, dy),
             Shape::Step { at, .. } => shift(at, dx, dy),
             Shape::Callout { tip, pos, .. } => {
@@ -581,7 +611,8 @@ impl Annotation {
             | Shape::Ellipse(r)
             | Shape::Pixelate(r)
             | Shape::Blur(r)
-            | Shape::Fill(r) => *r = to,
+            | Shape::Fill(r)
+            | Shape::Magnify { r, .. } => *r = to,
             Shape::Text { pos, size, .. } => {
                 *size = (*size * sy).max(4.0);
                 *pos = Pt::new(to.x, to.y);
@@ -630,9 +661,11 @@ impl Annotation {
                 let d = (((p.x - c.x) / rx).powi(2) + ((p.y - c.y) / ry).powi(2)).sqrt();
                 (d - 1.0).abs() * rx.min(ry) <= tol + self.width / 2.0
             }
-            Shape::Text { .. } | Shape::Pixelate(_) | Shape::Blur(_) | Shape::Fill(_) => {
-                self.bounds().inflate(tol).contains(p)
-            }
+            Shape::Text { .. }
+            | Shape::Pixelate(_)
+            | Shape::Blur(_)
+            | Shape::Fill(_)
+            | Shape::Magnify { .. } => self.bounds().inflate(tol).contains(p),
             Shape::Step { at, r, .. } => at.dist(p) <= r + tol,
             Shape::Callout {
                 tip,
@@ -731,6 +764,10 @@ mod tests {
                 size: 12.0,
             },
             Shape::Blur(RectF::new(60.0, 40.0, 120.0, 80.0)),
+            Shape::Magnify {
+                r: RectF::new(100.0, 60.0, 90.0, 90.0),
+                zoom: 2.0,
+            },
             Shape::Fill(RectF::new(10.0, 10.0, 30.0, 12.0)),
         ];
         let src_px: Vec<u32> = (0..w * h)

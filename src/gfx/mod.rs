@@ -656,6 +656,49 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Fill the ellipse in `r` (canvas space) with what `src` shows around
+    /// its middle, `zoom` times bigger. `src` shares this canvas' coordinate
+    /// space before the offset is applied.
+    pub fn magnify(&mut self, src: &[u32], sw: u32, sh: u32, r: RectF, zoom: f32) {
+        if r.w < 1.0 || r.h < 1.0 || sw == 0 || sh == 0 || self.record(r, 0.0) {
+            return;
+        }
+        let zoom = zoom.max(1.0);
+        let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let (rx, ry) = (r.w / 2.0, r.h / 2.0);
+        let (ox, oy) = (self.ox, self.oy);
+        let dev = RectF::new(r.x + ox, r.y + oy, r.w, r.h)
+            .round_out()
+            .intersect(&RectI::new(0, 0, self.w as i32, self.h as i32));
+        let cw = self.w as usize;
+        for dy in dev.y..dev.bottom() {
+            for dx in dev.x..dev.right() {
+                // This pixel's middle in canvas space.
+                let (px, py) = (dx as f32 + 0.5 - ox, dy as f32 + 0.5 - oy);
+                let (nx, ny) = ((px - cx) / rx, (py - cy) / ry);
+                let d = (nx * nx + ny * ny).sqrt();
+                // Soft edge, one pixel wide.
+                let cov = ((1.0 - d) * rx.min(ry) + 0.5).clamp(0.0, 1.0);
+                if cov <= 0.0 {
+                    continue;
+                }
+                let s = bilinear(
+                    src,
+                    sw,
+                    sh,
+                    cx + (px - cx) / zoom - 0.5,
+                    cy + (py - cy) / zoom - 0.5,
+                );
+                let i = dy as usize * cw + dx as usize;
+                self.buf[i] = if cov >= 1.0 {
+                    s
+                } else {
+                    blend(self.buf[i], s, cov)
+                };
+            }
+        }
+    }
+
     /// Draw an opaque RGBA image scaled to fit `dst` (box-sampled, for thumbnails).
     pub fn blit_rgba_fit(&mut self, rgba: &[u8], iw: u32, ih: u32, dst: RectF) {
         if iw == 0 || ih == 0 || dst.is_empty() || self.record(dst, 0.0) {
@@ -833,6 +876,28 @@ fn lerp_px(a: u32, b: u32, k: u32) -> u32 {
 }
 
 /// Rounded rectangle path (cubic corner approximation).
+/// The colour of `src` at (`x`, `y`), between pixel centres (edges clamped).
+fn bilinear(src: &[u32], sw: u32, sh: u32, x: f32, y: f32) -> u32 {
+    let (fx, fy) = (x.floor(), y.floor());
+    let (tx, ty) = (x - fx, y - fy);
+    let clamp = |v: f32, max: u32| (v as i64).clamp(0, max as i64 - 1) as usize;
+    let (x0, y0) = (clamp(fx, sw), clamp(fy, sh));
+    let (x1, y1) = (clamp(fx + 1.0, sw), clamp(fy + 1.0, sh));
+    let w = sw as usize;
+    let top = blend(src[y0 * w + x0], src[y0 * w + x1], tx);
+    let bottom = blend(src[y1 * w + x0], src[y1 * w + x1], tx);
+    blend(top, bottom, ty)
+}
+
+/// `a` mixed with `b` by `t` (0 = `a`, 1 = `b`), opaque.
+fn blend(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |s: u32| {
+        let (ca, cb) = (((a >> s) & 0xFF) as f32, ((b >> s) & 0xFF) as f32);
+        ((ca + (cb - ca) * t).round() as u32).min(255) << s
+    };
+    0xFF00_0000 | ch(16) | ch(8) | ch(0)
+}
+
 pub fn rrect_path(r: RectF, radius: f32) -> Option<Path> {
     if r.w <= 0.0 || r.h <= 0.0 {
         return None;
