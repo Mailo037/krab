@@ -90,6 +90,9 @@ pub fn list_windows() -> Vec<WinInfo> {
     list.into_iter().map(|(_, w)| w).collect()
 }
 
+/// Whether [`capture_window`] can render a window by itself.
+pub const RENDERS_WINDOWS: bool = cfg!(target_os = "macos");
+
 /// Render one window by itself. macOS composes every window separately, so
 /// asking for just this window leaves out whatever covers it.
 #[cfg(target_os = "macos")]

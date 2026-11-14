@@ -1,5 +1,5 @@
 use super::*;
-use crate::capture::{Shot, WinInfo};
+use crate::capture::{Shot, WinInfo, WindowCache, WindowImage};
 
 // Large enough that the toolbars never cover the areas the tests draw in.
 const W: u32 = 1000;
@@ -602,6 +602,29 @@ fn window_snip_leaves_out_the_windows_on_top() {
     o.activate(Btn::Mode(Mode::Rect));
     drag(&mut o, (60.0, 50.0), (360.0, 250.0));
     assert_eq!(pixel(&o.compose().unwrap(), 100, 60), [0, 160, 110, 255]);
+}
+
+/// The same window as `fake_window`, rendered when the snip started:
+/// its content has moved on since.
+fn earlier_window(_id: u64) -> Option<WindowImage> {
+    let (w, h) = (300, 200);
+    Some(WindowImage {
+        w,
+        h,
+        px: vec![0xFF65_4321; (w * h) as usize],
+    })
+}
+
+#[test]
+fn window_snip_shows_the_window_as_it_was_when_the_snip_started() {
+    let mut o = stacked_windows(Mode::Window);
+    o.opts.precaptured = Some(WindowCache::with_grabber(vec![2], earlier_window));
+    click(&mut o, (70.0, 60.0));
+    assert_eq!(o.selection(), Some(RectI::new(60, 50, 300, 200)));
+    assert_eq!(
+        pixel(&o.compose().unwrap(), 100, 60),
+        [0x65, 0x43, 0x21, 255]
+    );
 }
 
 #[test]

@@ -11,11 +11,12 @@ mod menu;
 mod render;
 
 use crate::annotate::{text_size, Annotation, Shape, Source, Tool};
-use crate::capture::{Shot, WinInfo, WindowImage};
+use crate::capture::{Shot, WinInfo, WindowCache};
 use crate::config::Config;
 use crate::geom::{Pt, RectF, RectI};
 use crate::gfx::{theme, Canvas, Color};
 use crate::output::Image;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -150,8 +151,7 @@ pub enum Outcome {
     Scroll(RectI),
 }
 
-/// Renders one window on its own (see `capture::grab_window`).
-pub type WindowGrabber = fn(u64) -> Option<WindowImage>;
+pub use crate::capture::WindowGrabber;
 
 /// Per-session settings derived from the user's config.
 #[derive(Clone, Debug)]
@@ -166,6 +166,9 @@ pub struct Options {
     pub color: Color,
     /// Used to show a picked window without the windows covering it.
     pub grab_window: Option<WindowGrabber>,
+    /// The covered windows as they were rendered when the snip started;
+    /// preferred over rendering them with `grab_window` once picked.
+    pub precaptured: Option<WindowCache>,
     /// Framed output: background gradient colours.
     pub frame: Option<(Color, Color)>,
     /// Colours used when framing is switched on in the overlay.
@@ -186,6 +189,7 @@ impl Options {
             border: cfg.border.then(|| (cfg.border_color(), cfg.border_width)),
             color: cfg.annotation_color(),
             grab_window: Some(crate::capture::grab_window),
+            precaptured: None,
             frame: cfg.frame.then(|| cfg.frame_colors()),
             frame_colors: cfg.frame_colors(),
             color_format: cfg.color_format.clone(),
@@ -204,6 +208,7 @@ impl Default for Options {
             border: None,
             color: theme::PALETTE[0],
             grab_window: None,
+            precaptured: None,
             frame: None,
             frame_colors: (theme::ACCENT, Color::rgb(0x7B, 0x2F, 0xF7)),
             color_format: "hex".into(),
@@ -717,7 +722,11 @@ impl Overlay {
         if !win.covered || self.ui.kind != Kind::Snip || win.full.w <= 0 || win.full.h <= 0 {
             return;
         }
-        let Some(img) = self.opts.grab_window.and_then(|grab| grab(win.id)) else {
+        let rendered = self.opts.precaptured.as_ref().and_then(|c| c.get(win.id));
+        let Some(img) = rendered.or_else(|| {
+            let grab = self.opts.grab_window?;
+            grab(win.id).map(Arc::new)
+        }) else {
             return;
         };
         let r = win

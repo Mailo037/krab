@@ -480,6 +480,11 @@ impl App {
 
     fn open_session(&mut self, el: &ActiveEventLoop, cap: Capture, req: Request) {
         trace::mark("capture received");
+        // Before anything else, so covered windows are rendered as close to
+        // the moment of the capture as possible.
+        let precaptured = (self.cfg.precapture_windows && req.kind == Kind::Snip)
+            .then(|| capture::WindowCache::start(&cap))
+            .flatten();
         // Our own toasts must not sit on top of the overlay.
         self.huds.retain(|h| !matches!(h.hud, Hud::Toast { .. }));
 
@@ -500,6 +505,7 @@ impl App {
         }
         opts.quick_text = req.text;
         opts.scroll = req.scroll;
+        opts.precaptured = precaptured;
         if req.kind == Kind::Record {
             crate::record::warm_up();
         }

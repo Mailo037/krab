@@ -66,6 +66,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 |---|---|
 | Rectangle, freeform, window and full-screen snips | yes |
 | Window snips leave out windows lying on top of the app | yes (Windows, macOS) |
+| ...and show that app as it was when the snip started, not as it is once picked | yes - switch off in the settings |
 | Delayed snips (1 to 15 s from the timer button, or any value from the command line) | yes |
 | Pen, highlighter, eraser | yes |
 | Shapes: line, arrow, rectangle, ellipse | yes |

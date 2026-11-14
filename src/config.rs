@@ -40,6 +40,9 @@ pub struct Config {
     pub border_width: u32,
     /// Show the pixel magnifier while selecting.
     pub loupe: bool,
+    /// Render covered windows in the background as a snip starts, so a
+    /// window snip shows them as they were then, not as they are once picked.
+    pub precapture_windows: bool,
     /// Seconds used by the delay button.
     pub delay_seconds: u32,
     /// Frames per second for screen recordings.
@@ -86,6 +89,7 @@ impl Default for Config {
             border_color: theme::ACCENT.to_hex_string(),
             border_width: 2,
             loupe: true,
+            precapture_windows: true,
             delay_seconds: 3,
             record_fps: 30,
             record_audio: "off".into(),
@@ -221,6 +225,7 @@ impl Config {
              # record_encoder:  auto (graphics card when possible) | software\n\
              # color_format:    hex | rgb | hsl (what the colour picker copies)\n\
              # frame_colors:    two colours for the background of framed snips\n\
+             # precapture_windows: true keeps covered windows as they were when the snip started\n\
              # auto_update:     true installs new versions automatically, false only via `krab --update`\n\n{body}"
         )
     }

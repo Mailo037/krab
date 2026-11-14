@@ -427,6 +427,9 @@ pub fn list_windows() -> Vec<WinInfo> {
     list
 }
 
+/// [`capture_window`] works here.
+pub const RENDERS_WINDOWS: bool = true;
+
 /// Render one window by itself, without the windows on top of it.
 ///
 /// `PrintWindow` with `PW_RENDERFULLCONTENT` copies the window's own DWM

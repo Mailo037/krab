@@ -52,6 +52,7 @@ enum Toggle {
     Notifications,
     Border,
     Loupe,
+    Precapture,
     Background,
     Autostart,
     AutoUpdate,
@@ -162,6 +163,7 @@ impl Toggle {
                     "Colour magnifier (tap Alt to toggle)"
                 }
             }
+            Toggle::Precapture => "Capture covered windows as the snip starts",
             Toggle::Background => {
                 if cfg!(target_os = "macos") {
                     "Keep running in the menu bar"
@@ -273,6 +275,14 @@ impl Settings {
         if self.windows_snipping && uses_print {
             shortcuts.push(Row::WindowsSnipping);
         }
+        let mut snipping = vec![
+            Row::Choice(Choice::Mode, "Start with"),
+            Row::Toggle(Toggle::Loupe),
+        ];
+        if crate::platform::RENDERS_WINDOWS {
+            snipping.push(Row::Toggle(Toggle::Precapture));
+        }
+        snipping.push(Row::Choice(Choice::ColorFormat, "Colour picker copies"));
         vec![
             ("Shortcuts", shortcuts),
             (
@@ -289,14 +299,7 @@ impl Settings {
                     Row::Toggle(Toggle::History),
                 ],
             ),
-            (
-                "Snipping",
-                vec![
-                    Row::Choice(Choice::Mode, "Start with"),
-                    Row::Toggle(Toggle::Loupe),
-                    Row::Choice(Choice::ColorFormat, "Colour picker copies"),
-                ],
-            ),
+            ("Snipping", snipping),
             (
                 "Recording",
                 vec![
@@ -326,6 +329,7 @@ impl Settings {
             Toggle::Notifications => c.notifications,
             Toggle::Border => c.border,
             Toggle::Loupe => c.loupe,
+            Toggle::Precapture => c.precapture_windows,
             Toggle::Background => c.run_in_background,
             Toggle::Autostart => self.autostart,
             Toggle::AutoUpdate => c.auto_update,
@@ -430,6 +434,7 @@ impl Settings {
                     Toggle::Notifications => &mut c.notifications,
                     Toggle::Border => &mut c.border,
                     Toggle::Loupe => &mut c.loupe,
+                    Toggle::Precapture => &mut c.precapture_windows,
                     Toggle::Background => &mut c.run_in_background,
                     Toggle::AutoUpdate => &mut c.auto_update,
                     Toggle::Frame => &mut c.frame,
@@ -954,6 +959,25 @@ mod tests {
             click_on(&mut s, Hit::Toggle(Toggle::Autostart)),
             vec![Action::SetAutostart(true)]
         );
+    }
+
+    #[test]
+    fn capturing_covered_windows_in_advance_can_be_switched_off() {
+        let mut s = settings();
+        frame(&mut s);
+        let shown = s
+            .hits
+            .iter()
+            .any(|(_, h)| *h == Hit::Toggle(Toggle::Precapture));
+        assert_eq!(shown, crate::platform::RENDERS_WINDOWS);
+        if shown {
+            assert!(s.cfg.precapture_windows);
+            assert_eq!(
+                click_on(&mut s, Hit::Toggle(Toggle::Precapture)),
+                vec![Action::Save]
+            );
+            assert!(!s.cfg.precapture_windows);
+        }
     }
 
     #[test]
