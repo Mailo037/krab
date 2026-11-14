@@ -91,6 +91,18 @@ pub struct Capture {
     pub windows: Vec<WinInfo>,
     /// Pointer position in native desktop units, when the platform exposes it.
     pub cursor: Option<(i32, i32)>,
+    /// Covered windows being rendered since the capture (see [`Capture::precapture`]).
+    pub precaptured: Option<WindowCache>,
+}
+
+impl Capture {
+    /// Start rendering the covered windows in the background. Called on the
+    /// capturing thread right after the capture, before the overlay exists
+    /// and takes the focus.
+    pub fn precapture(mut self) -> Self {
+        self.precaptured = WindowCache::start(&self);
+        self
+    }
 }
 
 /// Grab every monitor plus the window list.
@@ -107,6 +119,7 @@ pub fn capture_all() -> Result<Capture, String> {
         shots,
         windows,
         cursor,
+        precaptured: None,
     })
 }
 
@@ -214,6 +227,7 @@ impl WindowCache {
 }
 
 fn precapture(inner: &Arc<CacheInner>, grab: WindowGrabber) {
+    let mut rendered = 0;
     loop {
         let id = {
             let Ok(mut st) = inner.state.lock() else {
@@ -237,8 +251,12 @@ fn precapture(inner: &Arc<CacheInner>, grab: WindowGrabber) {
         st.busy = None;
         st.done.insert(id, img);
         inner.ready.notify_all();
+        rendered += 1;
+        if rendered == 1 {
+            crate::trace::mark("first covered window rendered");
+        }
     }
-    crate::trace::mark("covered windows rendered");
+    crate::trace::mark(&format!("{rendered} covered windows rendered"));
 }
 
 /// The windows worth rendering in advance, the one under the pointer first,
@@ -384,6 +402,7 @@ mod tests {
             shots: vec![shot(RectI::new(0, 0, 1000, 800), 1000, 800)],
             windows,
             cursor,
+            precaptured: None,
         }
     }
 

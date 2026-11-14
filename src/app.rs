@@ -472,19 +472,18 @@ impl App {
         }
         self.capturing = true;
         let proxy = self.proxy.clone();
+        let precapture = self.cfg.precapture_windows && req.kind == Kind::Snip;
         std::thread::spawn(move || {
-            let result = capture::capture_all();
+            let mut result = capture::capture_all();
+            if precapture {
+                result = result.map(Capture::precapture);
+            }
             let _ = proxy.send_event(UserEvent::Captured(Box::new(result), req));
         });
     }
 
     fn open_session(&mut self, el: &ActiveEventLoop, cap: Capture, req: Request) {
         trace::mark("capture received");
-        // Before anything else, so covered windows are rendered as close to
-        // the moment of the capture as possible.
-        let precaptured = (self.cfg.precapture_windows && req.kind == Kind::Snip)
-            .then(|| capture::WindowCache::start(&cap))
-            .flatten();
         // Our own toasts must not sit on top of the overlay.
         self.huds.retain(|h| !matches!(h.hud, Hud::Toast { .. }));
 
@@ -505,12 +504,17 @@ impl App {
         }
         opts.quick_text = req.text;
         opts.scroll = req.scroll;
-        opts.precaptured = precaptured;
         if req.kind == Kind::Record {
             crate::record::warm_up();
         }
         let cursor = cap.cursor;
-        let Capture { shots, windows, .. } = cap;
+        let Capture {
+            shots,
+            windows,
+            precaptured,
+            ..
+        } = cap;
+        opts.precaptured = precaptured;
         let mut wins = Vec::with_capacity(shots.len());
         let mut focus = 0;
 

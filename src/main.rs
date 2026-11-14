@@ -174,8 +174,13 @@ fn snip(args: &Args, req: Request) -> Result<(), String> {
         let (tx, rx) = mpsc::channel();
         let req = req.clone();
         std::thread::spawn(move || {
-            let result = capture::capture_all();
+            let mut result = capture::capture_all();
             trace::mark("screen captured");
+            // The main thread loads the config too; this copy only decides
+            // whether to render the covered windows before the overlay is up.
+            if req.kind == krab::overlay::Kind::Snip && Config::load().precapture_windows {
+                result = result.map(capture::Capture::precapture);
+            }
             if let Ok(proxy) = rx.recv() {
                 let proxy: winit::event_loop::EventLoopProxy<UserEvent> = proxy;
                 let _ = proxy.send_event(UserEvent::Captured(Box::new(result), req));
