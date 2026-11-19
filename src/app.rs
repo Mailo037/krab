@@ -2512,6 +2512,11 @@ impl ApplicationHandler<UserEvent> for App {
                 Some(&sample),
                 None,
             );
+            // Making the toast window can swallow the settings window's
+            // pending repaint, which then still shows the old spot.
+            if let Some(sw) = self.settings.as_mut() {
+                draw_settings(sw);
+            }
         }
         self.tick(el);
         if (!self.launch.daemon || update::restart_requested().is_some()) && self.idle() {
