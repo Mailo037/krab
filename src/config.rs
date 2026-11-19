@@ -36,6 +36,11 @@ pub struct Config {
     pub jpeg_quality: u8,
     /// Show a confirmation after capturing.
     pub notifications: bool,
+    /// Where notifications appear: top-left, top-center, top-right,
+    /// bottom-left, bottom-center or bottom-right.
+    pub toast_position: String,
+    /// How big notifications are: small, medium or large.
+    pub toast_size: String,
     /// Draw a border around every snip.
     pub border: bool,
     pub border_color: String,
@@ -88,6 +93,8 @@ impl Default for Config {
             file_format: "png".into(),
             jpeg_quality: 92,
             notifications: true,
+            toast_position: "bottom-right".into(),
+            toast_size: "medium".into(),
             border: false,
             border_color: theme::ACCENT.to_hex_string(),
             border_width: 2,
@@ -204,6 +211,10 @@ impl Config {
             "hsl" => "hsl".into(),
             _ => "hex".into(),
         };
+        self.toast_position = crate::hud::ToastPos::parse(&self.toast_position)
+            .key()
+            .into();
+        self.toast_size = crate::hud::ToastSize::parse(&self.toast_size).key().into();
         self.file_format = match self.file_format.to_ascii_lowercase().as_str() {
             "jpg" | "jpeg" => "jpg".into(),
             "bmp" => "bmp".into(),
@@ -237,7 +248,9 @@ impl Config {
              # record_audio:    off | system | mic | both (MP4 recordings, needs ffmpeg)\n\
              # record_encoder:  auto (graphics card when possible) | software\n\
              # color_format:    hex | rgb | hsl (what the colour picker copies)\n\
-             # frame_colors:    two colours for the background of framed snips\n\
+             # toast_position:  top-left | top-center | top-right | bottom-left | bottom-center | bottom-right\n\
+             # toast_size:      small | medium | large (how big notifications are)\n\
+             # frame_colors:   two colours for the background of framed snips\n\
              # precapture_windows: true keeps covered windows as they were when the snip started\n\
              # auto_update:     true installs new versions automatically, false only via `krab --update`\n\n{body}"
         )
@@ -310,6 +323,13 @@ mod tests {
         assert_eq!(c.file_format, "jpg");
         assert_eq!(c.jpeg_quality, 10);
         assert_eq!(c.default_mode, "rect");
+    }
+
+    #[test]
+    fn unknown_toast_values_fall_back() {
+        let c = Config::parse("toast_position = \"middle\"\ntoast_size = \"LARGE\"");
+        assert_eq!(c.toast_position, "bottom-right");
+        assert_eq!(c.toast_size, "large");
     }
 
     #[test]

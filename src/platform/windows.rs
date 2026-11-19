@@ -55,6 +55,23 @@ pub fn monitor_alive(m: &winit::monitor::MonitorHandle) -> bool {
     unsafe { GetMonitorInfoW(m.hmonitor() as HMONITOR, &mut info) != 0 }
 }
 
+/// The part of a monitor not covered by the taskbar, in device pixels.
+pub fn work_area(m: &winit::monitor::MonitorHandle) -> Option<RectI> {
+    use winit::platform::windows::MonitorHandleExtWindows;
+    let mut info: MONITORINFO = unsafe { zeroed() };
+    info.cbSize = size_of::<MONITORINFO>() as u32;
+    if unsafe { GetMonitorInfoW(m.hmonitor() as HMONITOR, &mut info) } == 0 {
+        return None;
+    }
+    let r = info.rcWork;
+    Some(RectI::new(
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+    ))
+}
+
 /// Reconnect stdout/stderr to the launching terminal (GUI-subsystem binaries
 /// start detached).
 pub fn attach_console() {

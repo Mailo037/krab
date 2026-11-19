@@ -99,6 +99,7 @@ Everything the Windows Snipping Tool does day to day, plus a few things it does 
 | Tray / menu bar icon and start with the system | yes |
 | Global shortcuts for snips and recording, changeable in the settings | yes (Linux: on X11) |
 | Settings window | yes |
+| Notifications: pick the corner (or the middle, top or bottom) and the size; hover to keep one, click to open the file | yes (Windows, macOS) |
 | Optional border around every snip | yes |
 | Multiple monitors | yes, one overlay per monitor (one selection at a time) |
 | Command line and scripting | yes |
@@ -292,6 +293,8 @@ save_dir = ""                  # empty = Pictures/Screenshots
 file_format = "png"            # png | jpg | bmp | gif
 jpeg_quality = 92
 notifications = true
+toast_position = "bottom-right" # top-left | top-center | top-right | bottom-left | bottom-center | bottom-right
+toast_size = "medium"          # small | medium | large
 border = false
 border_color = "#F46623"
 border_width = 2

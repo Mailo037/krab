@@ -28,6 +28,11 @@ pub fn message_cursor_pos() -> Option<(i32, i32)> {
 
 pub fn hide_console(_cmd: &mut std::process::Command) {}
 
+/// Not known here; callers leave room for a panel or dock themselves.
+pub fn work_area(_m: &winit::monitor::MonitorHandle) -> Option<RectI> {
+    None
+}
+
 /// Only needed on Windows, where winit panics on a monitor that is gone.
 pub fn monitor_alive(_m: &winit::monitor::MonitorHandle) -> bool {
     true

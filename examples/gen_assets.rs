@@ -509,7 +509,7 @@ fn draw_hud(c: &mut Canvas, hud: &Hud, x: f32, y: f32, scale: f32, hovered: bool
 /// The three status surfaces on a strip of wallpaper.
 fn scene_huds(snip: &krab::output::Image) -> (Vec<u32>, u32, u32) {
     let (w, h) = (1800u32, 330u32);
-    let s = 2.0;
+    let s = 1.8;
     let mut px = vec![0xFF00_0000u32; (w * h) as usize];
     let mut c = Canvas::new(&mut px, w, h);
     wallpaper(&mut c, w as f32, h as f32 * 3.0);
@@ -526,12 +526,13 @@ fn scene_huds(snip: &krab::output::Image) -> (Vec<u32>, u32, u32) {
         );
     };
 
-    let toast = Hud::Toast {
-        title: "Copied to clipboard".into(),
-        detail: "Saved to Screenshots - click to open".into(),
-        thumb: Some(hud::thumbnail(snip, 320, 220)),
-        action: None,
-    };
+    let toast = Hud::toast(
+        "Copied to clipboard".into(),
+        "Saved to Screenshots - click to open".into(),
+        Some(hud::thumbnail(snip, 320, 220)),
+        None,
+        hud::ToastSize::Medium,
+    );
     let countdown = Hud::Countdown {
         deadline: Instant::now() + Duration::from_millis(2600),
     };
@@ -544,7 +545,7 @@ fn scene_huds(snip: &krab::output::Image) -> (Vec<u32>, u32, u32) {
         drawing: Some(false),
     };
     // Lay the three surfaces out as one centred row.
-    let gap = 80.0;
+    let gap = 60.0;
     let widths = [
         toast.size().0 * s,
         countdown.size().0 * s,

@@ -37,6 +37,8 @@ pub enum Action {
     PickFolder,
     OpenConfigFile,
     CheckForUpdates,
+    /// Show a sample notification where and how big it will be.
+    PreviewToast,
     SetAutostart(bool),
     DisableWindowsSnipping,
     /// The title bar was grabbed: let the system move the window.
@@ -70,6 +72,7 @@ enum Choice {
     ColorFormat,
     Audio,
     Encoder,
+    ToastSize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +81,8 @@ enum Hit {
     Clear(Slot),
     Toggle(Toggle),
     Choice(Choice, usize),
+    /// A spot in the notification position picker (index into `ToastPos::ALL`).
+    ToastPos(usize),
     ChangeFolder,
     OpenConfig,
     CheckUpdates,
@@ -107,6 +112,8 @@ const AUDIO: [(&str, &str); 4] = [
     ("both", "Both"),
 ];
 const ENCODERS: [(&str, &str); 2] = [("auto", "Graphics card"), ("software", "CPU")];
+const TOAST_SIZES: [(&str, &str); 3] =
+    [("small", "Small"), ("medium", "Medium"), ("large", "Large")];
 
 impl Choice {
     fn options(self) -> &'static [(&'static str, &'static str)] {
@@ -117,6 +124,7 @@ impl Choice {
             Choice::ColorFormat => &COLOR_FORMATS,
             Choice::Audio => &AUDIO,
             Choice::Encoder => &ENCODERS,
+            Choice::ToastSize => &TOAST_SIZES,
         }
     }
 
@@ -134,6 +142,7 @@ impl Choice {
             Choice::ColorFormat => &cfg.color_format,
             Choice::Audio => &cfg.record_audio,
             Choice::Encoder => &cfg.record_encoder,
+            Choice::ToastSize => &cfg.toast_size,
         }
     }
 
@@ -145,6 +154,7 @@ impl Choice {
             Choice::ColorFormat => cfg.color_format = v.into(),
             Choice::Audio => cfg.record_audio = v.into(),
             Choice::Encoder => cfg.record_encoder = v.into(),
+            Choice::ToastSize => cfg.toast_size = v.into(),
         }
     }
 }
@@ -154,7 +164,7 @@ impl Toggle {
         match self {
             Toggle::Copy => "Copy to clipboard",
             Toggle::AutoSave => "Save every snip automatically",
-            Toggle::Notifications => "Show a confirmation",
+            Toggle::Notifications => "Show a notification after a snip",
             Toggle::Border => "Draw a border around snips",
             Toggle::Loupe => {
                 if cfg!(target_os = "macos") {
@@ -188,6 +198,8 @@ enum Row {
     Choice(Choice, &'static str),
     Toggle(Toggle),
     Folder,
+    /// Where notifications appear: a small screen with six spots.
+    ToastPosition,
     About,
 }
 
@@ -197,6 +209,7 @@ impl Row {
             Row::Shortcut(_) | Row::WindowsSnipping | Row::Folder | Row::About => 58.0,
             Row::Choice(..) => 52.0,
             Row::Toggle(_) => 46.0,
+            Row::ToastPosition => 128.0,
         }
     }
 }
@@ -283,6 +296,12 @@ impl Settings {
             snipping.push(Row::Toggle(Toggle::Precapture));
         }
         snipping.push(Row::Choice(Choice::ColorFormat, "Colour picker copies"));
+        let mut notifications = vec![Row::Toggle(Toggle::Notifications)];
+        // Linux shows the desktop's own notifications instead.
+        if !cfg!(target_os = "linux") && self.cfg.notifications {
+            notifications.push(Row::ToastPosition);
+            notifications.push(Row::Choice(Choice::ToastSize, "Size"));
+        }
         vec![
             ("Shortcuts", shortcuts),
             (
@@ -293,12 +312,12 @@ impl Settings {
                     Row::Toggle(Toggle::AutoSave),
                     Row::Folder,
                     Row::Choice(Choice::Format, "File format"),
-                    Row::Toggle(Toggle::Notifications),
                     Row::Toggle(Toggle::Border),
                     Row::Toggle(Toggle::Frame),
                     Row::Toggle(Toggle::History),
                 ],
             ),
+            ("Notifications", notifications),
             ("Snipping", snipping),
             (
                 "Recording",
@@ -445,6 +464,9 @@ impl Settings {
                 };
                 *v = !*v;
                 out.push(Action::Save);
+                if t == Toggle::Notifications && self.cfg.notifications {
+                    out.push(Action::PreviewToast);
+                }
             }
             Hit::Choice(choice, i) => {
                 let v = choice.options()[i].0;
@@ -452,6 +474,17 @@ impl Settings {
                     choice.set(&mut self.cfg, v);
                     out.push(Action::Save);
                 }
+                if choice == Choice::ToastSize {
+                    out.push(Action::PreviewToast);
+                }
+            }
+            Hit::ToastPos(i) => {
+                let key = crate::hud::ToastPos::ALL[i].key();
+                if self.cfg.toast_position != key {
+                    self.cfg.toast_position = key.into();
+                    out.push(Action::Save);
+                }
+                out.push(Action::PreviewToast);
             }
             Hit::ChangeFolder => out.push(Action::PickFolder),
             Hit::OpenConfig => out.push(Action::OpenConfigFile),
@@ -781,6 +814,52 @@ impl Settings {
                 let fit = ellipsize(&path, 11.5 * p.s, max * p.s);
                 p.text(&fit, lx, cy + 15.0, 11.5, theme::TEXT_DIM);
                 hits.push(b);
+            }
+            Row::ToastPosition => {
+                p.text("Position", lx, r.y + 30.0, 13.5, theme::TEXT);
+                p.text("Click where they", lx, r.y + 50.0, 11.5, theme::TEXT_DIM);
+                p.text("should show up", lx, r.y + 66.0, 11.5, theme::TEXT_DIM);
+                // A little monitor: the screen and its stand.
+                let screen = RectF::new(right - 176.0, r.y + 14.0, 176.0, 92.0);
+                let stand = RectF::new(screen.center().x - 18.0, screen.bottom() + 3.0, 36.0, 4.0);
+                p.c.fill_rrect(p.r(stand), 2.0 * p.s, CONTROL_HOVER);
+                p.c.fill_rrect(p.r(screen), 9.0 * p.s, CONTROL);
+                p.c.stroke_rrect(
+                    p.r(screen),
+                    9.0 * p.s,
+                    1.0 * p.s,
+                    Color::rgba(255, 255, 255, 40),
+                );
+                let current = crate::hud::ToastPos::parse(&self.cfg.toast_position);
+                let (cw, ch) = (screen.w / 3.0, screen.h / 2.0);
+                for (i, pos) in crate::hud::ToastPos::ALL.into_iter().enumerate() {
+                    let col = (pos.column() + 1) as f32;
+                    let row = if pos.top() { 0.0 } else { 1.0 };
+                    // Each spot reacts anywhere in its sixth of the screen.
+                    let cell = RectF::new(screen.x + col * cw, screen.y + row * ch, cw, ch);
+                    let (sw, sh) = (40.0, 15.0);
+                    let sx = match pos.column() {
+                        -1 => screen.x + 9.0,
+                        0 => screen.center().x - sw / 2.0,
+                        _ => screen.right() - 9.0 - sw,
+                    };
+                    let sy = if pos.top() {
+                        screen.y + 9.0
+                    } else {
+                        screen.bottom() - 9.0 - sh
+                    };
+                    let spot = RectF::new(sx, sy, sw, sh);
+                    let hit = Hit::ToastPos(i);
+                    let fill = if pos == current {
+                        theme::ACCENT
+                    } else if p.hover == Some(hit) {
+                        Color::rgba(255, 255, 255, 90)
+                    } else {
+                        Color::rgba(255, 255, 255, 34)
+                    };
+                    p.c.fill_rrect(p.r(spot), 4.0 * p.s, fill);
+                    hits.push((cell, hit));
+                }
             }
             Row::About => {
                 let b2 = p.button("Check for updates", right, cy, Hit::CheckUpdates);

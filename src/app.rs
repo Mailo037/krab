@@ -120,7 +120,8 @@ fn live_monitor(m: Option<MonitorHandle>) -> Option<MonitorHandle> {
 #[derive(Clone, Copy)]
 enum Anchor {
     TopCenter,
-    BottomRight,
+    /// Where the user wants notifications.
+    Toast(crate::hud::ToastPos),
 }
 
 struct PinWin {
@@ -153,6 +154,8 @@ struct HudWin {
     hud: Hud,
     scale: f32,
     expires: Option<Instant>,
+    /// How long it stays; the time starts again while the pointer is on it.
+    ttl: Option<Duration>,
     hovered: bool,
 }
 
@@ -181,6 +184,9 @@ pub struct App {
     /// A finished snip waiting to be copied / saved.
     pending: Option<(Finish, Image)>,
     last_monitor: Option<MonitorHandle>,
+    /// Show a sample toast (asked for by the settings, which have no event
+    /// loop at hand).
+    preview_toast: bool,
     /// Testing aid: when to cancel the open overlay automatically.
     session_deadline: Option<Instant>,
     started: bool,
@@ -239,6 +245,7 @@ pub fn run(cfg: Config, launch: Launch) -> Result<(), String> {
         busy: 0,
         pending: None,
         last_monitor: None,
+        preview_toast: false,
         session_deadline: None,
         started: false,
         tray: None,
@@ -961,6 +968,19 @@ impl App {
         if !self.cfg.notifications {
             return;
         }
+        self.show_toast(el, title, detail, img, action);
+    }
+
+    /// A toast that shows whether or not notifications are switched on
+    /// (the preview in the settings).
+    fn show_toast(
+        &mut self,
+        el: &ActiveEventLoop,
+        title: String,
+        detail: String,
+        img: Option<&Image>,
+        action: Option<PathBuf>,
+    ) {
         #[cfg(target_os = "linux")]
         {
             // Desktop notifications are the native idiom here (and Wayland
@@ -980,30 +1000,20 @@ impl App {
         #[cfg(not(target_os = "linux"))]
         {
             self.huds.retain(|h| !matches!(h.hud, Hud::Toast { .. }));
-            let thumb = img.map(|i| crate::hud::thumbnail(i, 320, 220));
-            let hud = Hud::Toast {
-                title,
-                detail,
-                thumb,
-                action,
-            };
-            self.show_hud(
-                el,
-                hud,
-                Anchor::BottomRight,
-                Some(Duration::from_millis(3200)),
-            );
+            let size = crate::hud::ToastSize::parse(&self.cfg.toast_size);
+            let pos = crate::hud::ToastPos::parse(&self.cfg.toast_position);
+            let (tw, th) = size.thumb_size();
+            let thumb = img.map(|i| crate::hud::thumbnail(i, tw, th));
+            let hud = Hud::toast(title, detail, thumb, action, size);
+            self.show_hud(el, hud, Anchor::Toast(pos), Some(crate::hud::TOAST_TIME));
         }
     }
 
     fn show_hud(&mut self, el: &ActiveEventLoop, hud: Hud, anchor: Anchor, ttl: Option<Duration>) {
-        let monitor = match anchor {
-            Anchor::TopCenter => {
-                live_monitor(self.last_monitor.clone()).or_else(|| el.primary_monitor())
-            }
-            Anchor::BottomRight => el.primary_monitor(),
-        }
-        .or_else(|| el.available_monitors().next());
+        // The screen of the last snip, else the main screen.
+        let monitor = live_monitor(self.last_monitor.clone())
+            .or_else(|| el.primary_monitor())
+            .or_else(|| el.available_monitors().next());
         let (origin, area, scale) = match &monitor {
             Some(m) => (m.position(), m.size(), m.scale_factor() as f32),
             None => (
@@ -1019,10 +1029,20 @@ impl App {
                 origin.x + (area.width as i32 - w as i32) / 2,
                 origin.y + (18.0 * scale) as i32,
             ),
-            Anchor::BottomRight => (
-                origin.x + area.width as i32 - w as i32 - (20.0 * scale) as i32,
-                origin.y + area.height as i32 - h as i32 - (68.0 * scale) as i32,
-            ),
+            Anchor::Toast(pos) => {
+                // Keep clear of the taskbar; where it is not known, leave
+                // room for one at the bottom.
+                let work = monitor
+                    .as_ref()
+                    .and_then(crate::platform::work_area)
+                    .unwrap_or(RectI::new(
+                        origin.x,
+                        origin.y,
+                        area.width as i32,
+                        area.height as i32 - (48.0 * scale) as i32,
+                    ));
+                pos.place(work, w as i32, h as i32, (16.0 * scale) as i32)
+            }
         };
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut attrs = Window::default_attributes()
@@ -1062,6 +1082,7 @@ impl App {
             hud,
             scale,
             expires: ttl.map(|d| Instant::now() + d),
+            ttl,
             hovered: false,
         };
         // Created hidden: show it cloaked and uncloak it with its first frame
@@ -1632,10 +1653,11 @@ impl App {
         match event {
             WindowEvent::RedrawRequested => draw_hud(win),
             WindowEvent::CursorEntered { .. } | WindowEvent::CursorMoved { .. } => {
-                if let (WindowEvent::CursorMoved { position, .. }, Hud::Recording { pointer, .. }) =
-                    (&event, &mut win.hud)
-                {
-                    *pointer = Some(crate::geom::Pt::new(position.x as f32, position.y as f32));
+                if let WindowEvent::CursorMoved { position, .. } = &event {
+                    win.hud.set_pointer(Some(crate::geom::Pt::new(
+                        position.x as f32,
+                        position.y as f32,
+                    )));
                     win.window.request_redraw();
                 }
                 if !win.hovered {
@@ -1645,9 +1667,7 @@ impl App {
             }
             WindowEvent::CursorLeft { .. } => {
                 win.hovered = false;
-                if let Hud::Recording { pointer, .. } = &mut win.hud {
-                    *pointer = None;
-                }
+                win.hud.set_pointer(None);
                 win.window.request_redraw();
             }
             WindowEvent::MouseInput {
@@ -1655,9 +1675,19 @@ impl App {
                 button: MouseButton::Left,
                 ..
             } => match &win.hud {
-                Hud::Toast { action, .. } => {
-                    if let Some(path) = action {
-                        output::open_path(path);
+                Hud::Toast {
+                    action, pointer, ..
+                } => {
+                    let size = win.window.inner_size();
+                    let hit = pointer.map(|p| {
+                        win.hud
+                            .hit(p, size.width as f32, size.height as f32, win.scale)
+                    });
+                    // The close button only closes; anywhere else opens.
+                    if hit != Some(crate::hud::HudHit::Close) {
+                        if let Some(path) = action {
+                            output::open_path(path);
+                        }
                     }
                     self.huds.remove(idx);
                 }
@@ -1717,10 +1747,21 @@ impl App {
                 self.request(el, req);
             }
         }
-        self.huds
-            .retain(|h| h.expires.is_none_or(|t| now < t || h.hovered));
+        for win in &mut self.huds {
+            if let (Some(ttl), Some(expires)) = (win.ttl, win.expires.as_mut()) {
+                // The pointer on it holds it; the time starts again after.
+                if win.hovered {
+                    *expires = now + ttl;
+                }
+                if let Hud::Toast { left, .. } = &mut win.hud {
+                    *left = expires.saturating_duration_since(now).as_secs_f32()
+                        / ttl.as_secs_f32().max(0.001);
+                }
+            }
+        }
+        self.huds.retain(|h| h.expires.is_none_or(|t| now < t));
         for win in &self.huds {
-            if win.hud.animated() {
+            if win.hud.frame_interval().is_some() {
                 win.window.request_redraw();
             }
         }
@@ -1765,8 +1806,8 @@ impl App {
                     t
                 });
             }
-            if win.hud.animated() {
-                consider(now + Duration::from_millis(200));
+            if let Some(every) = win.hud.frame_interval() {
+                consider(now + every);
             }
         }
         if let Some(session) = &self.session {
@@ -2215,6 +2256,7 @@ impl App {
                 }
             }
             Action::CheckForUpdates => self.check_for_updates(),
+            Action::PreviewToast => self.preview_toast = true,
             Action::SetAutostart(on) => {
                 if let Err(e) = crate::platform::autostart::set(on) {
                     eprintln!("krab: autostart: {e}");
@@ -2460,6 +2502,16 @@ impl ApplicationHandler<UserEvent> for App {
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         if let Some((kind, img)) = self.pending.take() {
             self.deliver(el, kind, img);
+        }
+        if std::mem::take(&mut self.preview_toast) {
+            let sample = crate::hud::sample_image();
+            self.show_toast(
+                el,
+                "Copied to clipboard".into(),
+                "Notifications show up here, like this".into(),
+                Some(&sample),
+                None,
+            );
         }
         self.tick(el);
         if (!self.launch.daemon || update::restart_requested().is_some()) && self.idle() {
