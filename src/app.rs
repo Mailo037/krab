@@ -99,13 +99,20 @@ struct PoolWin {
 /// hide a mapped window, so Linux creates overlay windows on demand instead.
 const POOL_WINDOWS: bool = cfg!(any(windows, target_os = "macos"));
 
-fn monitor_key(m: &MonitorHandle) -> (i32, i32, u32, u32) {
-    (
-        m.position().x,
-        m.position().y,
-        m.size().width,
-        m.size().height,
-    )
+/// Position and size of a monitor, or `None` once it is gone (switched off,
+/// unplugged, asleep). Ask this before anything else about a monitor that was
+/// stored earlier: winit panics on the size of a monitor that is gone.
+fn monitor_key(m: &MonitorHandle) -> Option<(i32, i32, u32, u32)> {
+    if !crate::platform::monitor_alive(m) {
+        return None;
+    }
+    let (pos, size) = (m.position(), m.size());
+    Some((pos.x, pos.y, size.width, size.height))
+}
+
+/// `m` if it is still connected.
+fn live_monitor(m: Option<MonitorHandle>) -> Option<MonitorHandle> {
+    m.filter(crate::platform::monitor_alive)
 }
 
 // Toasts are native notifications on Linux, so only one anchor is used there.
@@ -268,6 +275,11 @@ fn match_monitor(monitors: &[MonitorHandle], shot: &Shot, index: usize) -> Optio
         (shot.native.y as f32 * k).round() as i32,
     );
     let raw = (shot.native.x, shot.native.y);
+    let monitors: Vec<MonitorHandle> = monitors
+        .iter()
+        .filter(|m| crate::platform::monitor_alive(m))
+        .cloned()
+        .collect();
     let pos = |m: &MonitorHandle| (m.position().x, m.position().y);
     let size_ok = |m: &MonitorHandle| m.size().width == shot.w && m.size().height == shot.h;
     monitors
@@ -474,22 +486,24 @@ impl App {
         if !POOL_WINDOWS {
             return;
         }
-        let monitors: Vec<MonitorHandle> = el.available_monitors().collect();
+        let monitors: Vec<(MonitorHandle, (i32, i32, u32, u32))> = el
+            .available_monitors()
+            .filter_map(|m| monitor_key(&m).map(|k| (m, k)))
+            .collect();
+        // Windows of monitors that are gone (or changed) are dropped.
         self.pool.retain(|p| {
-            monitors
-                .iter()
-                .any(|m| monitor_key(m) == monitor_key(&p.monitor))
+            monitor_key(&p.monitor).is_some_and(|key| monitors.iter().any(|(_, k)| *k == key))
         });
-        for m in monitors {
+        for (m, (x, y, w, h)) in monitors {
             if self
                 .pool
                 .iter()
-                .any(|p| monitor_key(&p.monitor) == monitor_key(&m))
+                .any(|p| monitor_key(&p.monitor) == Some((x, y, w, h)))
             {
                 continue;
             }
-            let size = (m.size().width, m.size().height);
-            let native = RectI::new(m.position().x, m.position().y, size.0 as i32, size.1 as i32);
+            let size = (w, h);
+            let native = RectI::new(x, y, w as i32, h as i32);
             if let Some(window) = create_overlay_window(el, Some(&m), native, size) {
                 self.pool.push(PoolWin { window, monitor: m });
             }
@@ -584,11 +598,10 @@ impl App {
             let overlay = Overlay::new(shot, &windows, opts.clone(), shared);
 
             // Prefer a pre-made window for this monitor.
-            let pooled = monitor.as_ref().and_then(|m| {
-                let key = monitor_key(m);
+            let pooled = monitor.as_ref().and_then(monitor_key).and_then(|key| {
                 self.pool
                     .iter()
-                    .position(|p| monitor_key(&p.monitor) == key)
+                    .position(|p| monitor_key(&p.monitor) == Some(key))
                     .map(|i| self.pool.swap_remove(i).window)
             });
             let window = match pooled {
@@ -693,7 +706,10 @@ impl App {
                 win.window.set_visible(false);
                 // Keep the window for the next snip; its pixel buffers (the
                 // surface) are dropped so an idle Krab stays small.
-                if let (true, Some(monitor)) = (POOL_WINDOWS && self.launch.daemon, win.monitor) {
+                if let (true, Some(monitor)) = (
+                    POOL_WINDOWS && self.launch.daemon,
+                    live_monitor(win.monitor),
+                ) {
                     self.pool.push(PoolWin {
                         window: win.window,
                         monitor,
@@ -982,7 +998,9 @@ impl App {
 
     fn show_hud(&mut self, el: &ActiveEventLoop, hud: Hud, anchor: Anchor, ttl: Option<Duration>) {
         let monitor = match anchor {
-            Anchor::TopCenter => self.last_monitor.clone().or_else(|| el.primary_monitor()),
+            Anchor::TopCenter => {
+                live_monitor(self.last_monitor.clone()).or_else(|| el.primary_monitor())
+            }
             Anchor::BottomRight => el.primary_monitor(),
         }
         .or_else(|| el.available_monitors().next());
@@ -1320,9 +1338,7 @@ impl App {
 
     fn open_pin(&mut self, el: &ActiveEventLoop, img: Image, at: Option<PhysicalPosition<i32>>) {
         let mut pin = crate::pin::Pin::new(img);
-        let monitor = self
-            .last_monitor
-            .clone()
+        let monitor = live_monitor(self.last_monitor.clone())
             .or_else(|| el.primary_monitor())
             .or_else(|| el.available_monitors().next());
         let scale = monitor.as_ref().map_or(1.0, |m| m.scale_factor() as f32);

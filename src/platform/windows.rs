@@ -45,6 +45,16 @@ pub fn init_process() {
     }
 }
 
+/// Whether a monitor handle still points at a connected monitor. A handle
+/// goes stale when a screen is switched off, unplugged or sleeps, and winit
+/// panics when asked for the size of such a monitor.
+pub fn monitor_alive(m: &winit::monitor::MonitorHandle) -> bool {
+    use winit::platform::windows::MonitorHandleExtWindows;
+    let mut info: MONITORINFO = unsafe { zeroed() };
+    info.cbSize = size_of::<MONITORINFO>() as u32;
+    unsafe { GetMonitorInfoW(m.hmonitor() as HMONITOR, &mut info) != 0 }
+}
+
 /// Reconnect stdout/stderr to the launching terminal (GUI-subsystem binaries
 /// start detached).
 pub fn attach_console() {

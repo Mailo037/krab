@@ -28,6 +28,11 @@ pub fn message_cursor_pos() -> Option<(i32, i32)> {
 
 pub fn hide_console(_cmd: &mut std::process::Command) {}
 
+/// Only needed on Windows, where winit panics on a monitor that is gone.
+pub fn monitor_alive(_m: &winit::monitor::MonitorHandle) -> bool {
+    true
+}
+
 pub fn capture_monitors() -> Result<Vec<Shot>, String> {
     let monitors = Monitor::all().map_err(|e| format!("could not list monitors: {e}"))?;
     let mut shots = Vec::with_capacity(monitors.len());

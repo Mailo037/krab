@@ -78,9 +78,10 @@ fn main() -> ExitCode {
         }
         Command::Uninstall => uninstall_app(),
         Command::Daemon => {
-            if args.updated {
-                // The instance that installed the update is shutting down;
-                // wait until it has let go of the single-instance socket.
+            if args.updated || args.restarted {
+                // The instance that installed the update (or crashed) is
+                // shutting down; wait until it has let go of the
+                // single-instance socket.
                 let deadline = std::time::Instant::now() + Duration::from_secs(15);
                 while ipc::send(&Message::Ping).is_ok() && std::time::Instant::now() < deadline {
                     std::thread::sleep(Duration::from_millis(100));
@@ -98,7 +99,7 @@ fn main() -> ExitCode {
                         pending_capture: None,
                         initial: None,
                         output: None,
-                        quiet: args.quiet,
+                        quiet: args.quiet || args.restarted,
                         updated: args.updated,
                         installed: args.installed,
                         open_settings: false,
@@ -281,10 +282,62 @@ fn uninstall_app() -> Result<(), String> {
 /// Run the event loop; if it stopped to make way for an update, start the
 /// new version as the background instance.
 fn run_app(cfg: Config, launch: Launch) -> Result<(), String> {
+    if launch.daemon {
+        restart_after_crash();
+    }
     app::run(cfg, launch)?;
     match update::restart_requested() {
         Some(exe) => update::spawn_daemon(&exe),
         None => Ok(()),
+    }
+}
+
+/// Keep the background instance running: if it ever crashes, note why in
+/// `crash.log` next to the history and start a new background instance.
+/// A crash in the first half minute is not restarted, so a Krab that cannot
+/// start does not try again and again.
+fn restart_after_crash() {
+    let started = std::time::Instant::now();
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        write_crash_log(info);
+        if started.elapsed() > Duration::from_secs(30) {
+            if let Ok(exe) = std::env::current_exe() {
+                let mut cmd = std::process::Command::new(exe);
+                cmd.args(["--daemon", "--restarted"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                platform::hide_console(&mut cmd);
+                let _ = cmd.spawn();
+            }
+        }
+        default(info);
+    }));
+}
+
+fn write_crash_log(info: &std::panic::PanicHookInfo) {
+    use std::io::Write;
+    let Some(dir) = dirs::cache_dir().map(|d| d.join("krab")) else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("crash.log");
+    // Keep the file small: start over once it passes 64 KB.
+    let append = std::fs::metadata(&path).is_ok_and(|m| m.len() < 64 * 1024);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(&path);
+    if let Ok(mut f) = file {
+        let _ = writeln!(
+            f,
+            "{} krab {}: {info}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            env!("CARGO_PKG_VERSION"),
+        );
     }
 }
 

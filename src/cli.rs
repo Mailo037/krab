@@ -52,6 +52,8 @@ pub struct Args {
     pub updated: bool,
     /// This daemon was just installed as an application.
     pub installed: bool,
+    /// This daemon replaces one that crashed.
+    pub restarted: bool,
 }
 
 pub const HELP: &str = "\
@@ -108,6 +110,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
         background: false,
         updated: false,
         installed: false,
+        restarted: false,
     };
     let mut it = args.into_iter();
     let value = |it: &mut dyn Iterator<Item = String>, flag: &str| -> Result<String, String> {
@@ -125,6 +128,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Args, String> {
             "--background" => out.background = true,
             "--updated" => out.updated = true,
             "--installed" => out.installed = true,
+            "--restarted" => out.restarted = true,
             "--install" | "install" => command = Some(Command::Install),
             "--uninstall" | "uninstall" => command = Some(Command::Uninstall),
             "--autostart" => {
